@@ -371,6 +371,22 @@ class AlertMonitor:
                 await asyncio.sleep(5)
 
 
+from aiohttp import web
+
+async def handle_ping(request):
+    return web.Response(text="Бот працює! 🚨")
+
+async def init_web_server():
+    """Запускає міні-вебсервер, щоб хостинг (напр. Render) не присипляв бота."""
+    app = web.Application()
+    app.router.add_get('/', handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"🌐 Dummy web-server started on port {port}")
+
 async def main():
     # Перевірка конфігурації
     missing = []
@@ -385,18 +401,10 @@ async def main():
         logger.error(
             f"❌ Відсутні обов'язкові змінні оточення: {', '.join(missing)}"
         )
-        logger.error("")
-        logger.error("Встановіть їх перед запуском бота:")
-        logger.error(
-            "  export ALERTS_API_TOKEN='ваш_токен_alerts_in_ua'"
-        )
-        logger.error(
-            "  export TELEGRAM_BOT_TOKEN='ваш_токен_telegram_бота'"
-        )
-        logger.error(
-            "  export TELEGRAM_CHAT_ID='id_вашого_чату'"
-        )
         sys.exit(1)
+
+    # Запускаємо веб-сервер для Keep-Alive
+    await init_web_server()
 
     monitor = AlertMonitor()
     try:
