@@ -1,0 +1,406 @@
+#!/usr/bin/env python3
+"""
+Telegram бот для повідомлення про повітряну тривогу
+по Берестинському району (Харківська область).
+
+Використовує API alerts.in.ua для отримання даних.
+"""
+
+import asyncio
+import logging
+import os
+import sys
+from datetime import datetime, timezone, timedelta
+
+import aiohttp
+from telegram import Bot
+from telegram.constants import ParseMode
+
+# ─── Конфігурація ────────────────────────────────────────────────
+ALERTS_API_TOKEN = os.environ.get("ALERTS_API_TOKEN", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+# Інтервал опитування API (секунди). API має ліміт ~8-10 запитів/хв.
+POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "10"))
+
+# Район, який відслідковуємо.
+# API може використовувати як нову назву "Берестинський район",
+# так і стару "Красноградський район" — перевіряємо обидві.
+TARGET_DISTRICT_NAMES = [
+    "Берестинський район",
+    "Красноградський район",
+]
+
+ALERTS_API_BASE = "https://api.alerts.in.ua/v1"
+
+# Часовий пояс Києва (UTC+2 зима / UTC+3 літо — спрощено UTC+3)
+KYIV_TZ = timezone(timedelta(hours=3))
+
+# ─── Емоджі та тексти ────────────────────────────────────────────
+
+ALERT_TYPE_LABELS = {
+    "air_raid": "🚨 Повітряна тривога",
+    "artillery_shelling": "💥 Артилерійський обстріл",
+    "urban_fights": "⚔️ Вуличні бої",
+    "chemical": "☣️ Хімічна загроза",
+    "nuclear": "☢️ Ядерна загроза",
+}
+
+THREAT_TYPE_LABELS = {
+    "tactic_aircraft_activity": "✈️ Тактична авіація",
+    "strategic_aircraft_activity": "✈️ Стратегічна авіація",
+    "mig31k_departure": "✈️ Виліт МіГ-31К",
+    "ballistic_missiles": "🚀 Балістичні ракети",
+    "cruise_missiles": "🚀 Крилаті ракети",
+    "unspecified_missiles": "🚀 Ракетна загроза",
+    "drones": "🛩 Дрони (БПЛА)",
+    "guided_aerial_bombs": "💣 Керовані авіабомби (КАБ)",
+    "air_defense": "🛡 Робота ППО",
+    "unknown": "❓ Невідома загроза",
+}
+
+ALERT_LEVEL_EMOJI = {
+    "red": "🔴",
+    "yellow": "🟡",
+}
+
+# ─── Логування ────────────────────────────────────────────────────
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+
+# ─── Утиліти ──────────────────────────────────────────────────────
+
+def format_time(iso_str: str | None) -> str:
+    """Форматує ISO 8601 час в локальний Київський час."""
+    if not iso_str:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        dt_kyiv = dt.astimezone(KYIV_TZ)
+        return dt_kyiv.strftime("%d.%m.%Y %H:%M:%S")
+    except (ValueError, TypeError):
+        return iso_str
+
+
+def build_alert_on_message(alert: dict) -> str:
+    """Формує повідомлення про ПОЧАТОК тривоги."""
+    alert_type = alert.get("alert_type", "air_raid")
+    alert_label = ALERT_TYPE_LABELS.get(alert_type, f"⚠️ {alert_type}")
+    level = alert.get("alert_level", "")
+    level_emoji = ALERT_LEVEL_EMOJI.get(level, "")
+
+    location = alert.get("location_title", "Берестинський район")
+    started = format_time(alert.get("started_at"))
+
+    lines = [
+        f"{level_emoji} {alert_label}",
+        "",
+        f"📍 <b>{location}</b>",
+        f"🕐 Початок: <b>{started}</b>",
+    ]
+
+    # Додаємо інформацію про загрози, якщо є
+    threats = alert.get("threats", [])
+    if threats:
+        lines.append("")
+        lines.append("⚠️ <b>Загрози:</b>")
+        for threat in threats:
+            tt = threat.get("threat_type", "unknown")
+            tt_label = THREAT_TYPE_LABELS.get(tt, f"❓ {tt}")
+            t_level = threat.get("level", "")
+            t_level_emoji = ALERT_LEVEL_EMOJI.get(t_level, "")
+            source_msg = threat.get("source_message", "")
+            line = f"  • {t_level_emoji} {tt_label}"
+            if source_msg:
+                line += f" — <i>{source_msg}</i>"
+            lines.append(line)
+
+    notes = alert.get("notes", "")
+    if notes:
+        lines.append("")
+        lines.append(f"📝 {notes}")
+
+    lines.append("")
+    lines.append("🔗 <a href='https://alerts.in.ua'>alerts.in.ua</a>")
+
+    return "\n".join(lines)
+
+
+def build_alert_off_message(alert: dict) -> str:
+    """Формує повідомлення про ВІДБІЙ тривоги."""
+    location = alert.get("location_title", "Берестинський район")
+    started = format_time(alert.get("started_at"))
+    finished = format_time(alert.get("finished_at"))
+
+    # Розраховуємо тривалість
+    duration_str = ""
+    try:
+        s = datetime.fromisoformat(alert["started_at"].replace("Z", "+00:00"))
+        f = datetime.fromisoformat(alert["finished_at"].replace("Z", "+00:00"))
+        delta = f - s
+        hours, remainder = divmod(int(delta.total_seconds()), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        parts = []
+        if hours:
+            parts.append(f"{hours} год")
+        if minutes:
+            parts.append(f"{minutes} хв")
+        if seconds and not hours:
+            parts.append(f"{seconds} сек")
+        duration_str = " ".join(parts)
+    except (KeyError, ValueError, TypeError):
+        pass
+
+    lines = [
+        "✅ Відбій тривоги",
+        "",
+        f"📍 <b>{location}</b>",
+        f"🕐 Початок: {started}",
+        f"🕐 Кінець: <b>{finished}</b>",
+    ]
+
+    if duration_str:
+        lines.append(f"⏱ Тривалість: <b>{duration_str}</b>")
+
+    lines.append("")
+    lines.append("🔗 <a href='https://alerts.in.ua'>alerts.in.ua</a>")
+
+    return "\n".join(lines)
+
+
+# ─── Основна логіка ──────────────────────────────────────────────
+
+class AlertMonitor:
+    """Моніторинг тривог через API alerts.in.ua."""
+
+    def __init__(self):
+        self.bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        self.active_alerts: dict[int, dict] = {}  # id -> alert data
+        self._session: aiohttp.ClientSession | None = None
+        self._last_modified: str | None = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                headers={"Authorization": f"Bearer {ALERTS_API_TOKEN}"}
+            )
+        return self._session
+
+    async def close(self):
+        if self._session and not self._session.closed:
+            await self._session.close()
+
+    async def fetch_active_alerts(self) -> list[dict] | None:
+        """Отримує список активних тривог з API."""
+        session = await self._get_session()
+        url = f"{ALERTS_API_BASE}/alerts/active.json"
+
+        headers = {}
+        if self._last_modified:
+            headers["If-Modified-Since"] = self._last_modified
+
+        try:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 304:
+                    # Дані не змінились
+                    return None
+                if resp.status == 200:
+                    self._last_modified = resp.headers.get("Last-Modified")
+                    data = await resp.json()
+                    return data.get("alerts", [])
+                elif resp.status == 429:
+                    logger.warning("API rate limit (429). Чекаємо...")
+                    return None
+                else:
+                    text = await resp.text()
+                    logger.error(f"API error {resp.status}: {text}")
+                    return None
+        except aiohttp.ClientError as e:
+            logger.error(f"Помилка підключення до API: {e}")
+            return None
+
+    def filter_district_alerts(self, alerts: list[dict]) -> list[dict]:
+        """Фільтрує тривоги тільки для Берестинського району."""
+        result = []
+        for alert in alerts:
+            # Перевіряємо location_title (для районів)
+            title = alert.get("location_title", "")
+            raion = alert.get("location_raion", "")
+
+            for target in TARGET_DISTRICT_NAMES:
+                if target in title or target in raion:
+                    result.append(alert)
+                    break
+        return result
+
+    async def send_telegram(self, text: str):
+        """Відправляє повідомлення в Telegram чат."""
+        try:
+            await self.bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            logger.info("Повідомлення відправлено в Telegram")
+        except Exception as e:
+            logger.error(f"Помилка відправки в Telegram: {e}")
+
+    async def process_alerts(self, alerts: list[dict]):
+        """Обробляє нові та завершені тривоги."""
+        district_alerts = self.filter_district_alerts(alerts)
+
+        current_ids = {a["id"] for a in district_alerts}
+        previous_ids = set(self.active_alerts.keys())
+
+        # Нові тривоги (з'явились)
+        new_ids = current_ids - previous_ids
+        for alert in district_alerts:
+            if alert["id"] in new_ids:
+                logger.info(
+                    f"🚨 НОВА ТРИВОГА: {alert.get('location_title')} "
+                    f"(тип: {alert.get('alert_type')})"
+                )
+                msg = build_alert_on_message(alert)
+                await self.send_telegram(msg)
+                self.active_alerts[alert["id"]] = alert
+
+        # Оновлені тривоги (оновлення загроз тощо)
+        for alert in district_alerts:
+            if alert["id"] in previous_ids:
+                old = self.active_alerts[alert["id"]]
+                # Перевіряємо чи змінився alert_level або threats
+                old_threats = set(
+                    t.get("threat_type", "") for t in old.get("threats", [])
+                )
+                new_threats = set(
+                    t.get("threat_type", "") for t in alert.get("threats", [])
+                )
+                if new_threats - old_threats:
+                    # Нові загрози додались
+                    added = new_threats - old_threats
+                    logger.info(f"⚠️ Нові загрози: {added}")
+                    for threat in alert.get("threats", []):
+                        if threat.get("threat_type", "") in added:
+                            tt = threat.get("threat_type", "unknown")
+                            tt_label = THREAT_TYPE_LABELS.get(tt, tt)
+                            t_level = threat.get("level", "")
+                            t_level_emoji = ALERT_LEVEL_EMOJI.get(t_level, "")
+                            source_msg = threat.get("source_message", "")
+                            msg_lines = [
+                                f"⚠️ Нова загроза — {alert.get('location_title', 'Берестинський район')}",
+                                "",
+                                f"{t_level_emoji} {tt_label}",
+                            ]
+                            if source_msg:
+                                msg_lines.append(f"<i>{source_msg}</i>")
+                            await self.send_telegram("\n".join(msg_lines))
+
+                self.active_alerts[alert["id"]] = alert
+
+        # Завершені тривоги (зникли зі списку активних)
+        ended_ids = previous_ids - current_ids
+        for aid in ended_ids:
+            old_alert = self.active_alerts.pop(aid)
+            logger.info(
+                f"✅ ВІДБІЙ: {old_alert.get('location_title')} "
+                f"(тип: {old_alert.get('alert_type')})"
+            )
+            # Для відбою потрібен час finished_at. Якщо його немає в
+            # збережених даних, використовуємо поточний час.
+            if not old_alert.get("finished_at"):
+                old_alert["finished_at"] = datetime.now(timezone.utc).isoformat()
+            msg = build_alert_off_message(old_alert)
+            await self.send_telegram(msg)
+
+    async def run(self):
+        """Головний цикл моніторингу."""
+        logger.info("=" * 50)
+        logger.info("🤖 Бот повітряної тривоги запущено!")
+        logger.info(f"📍 Район: {', '.join(TARGET_DISTRICT_NAMES)}")
+        logger.info(f"⏱  Інтервал опитування: {POLL_INTERVAL} сек")
+        logger.info(f"💬 Telegram Chat ID: {TELEGRAM_CHAT_ID}")
+        logger.info("=" * 50)
+
+        # Перший запит — не відправляємо повідомлення,
+        # просто ініціалізуємо стан.
+        alerts = await self.fetch_active_alerts()
+        if alerts is not None:
+            district_alerts = self.filter_district_alerts(alerts)
+            for alert in district_alerts:
+                self.active_alerts[alert["id"]] = alert
+            if district_alerts:
+                logger.info(
+                    f"ℹ️  При запуску вже активні {len(district_alerts)} тривоги"
+                )
+                # Відправляємо стартове повідомлення
+                await self.send_telegram(
+                    f"🤖 <b>Бот запущено</b>\n\n"
+                    f"Моніторинг повітряної тривоги по Берестинському району.\n"
+                    f"Активних тривог: <b>{len(district_alerts)}</b>"
+                )
+            else:
+                logger.info("ℹ️  При запуску активних тривог немає")
+                await self.send_telegram(
+                    f"🤖 <b>Бот запущено</b>\n\n"
+                    f"Моніторинг повітряної тривоги по Берестинському району.\n"
+                    f"Наразі тривоги немає ✅"
+                )
+
+        # Основний цикл
+        while True:
+            await asyncio.sleep(POLL_INTERVAL)
+            try:
+                alerts = await self.fetch_active_alerts()
+                if alerts is not None:
+                    await self.process_alerts(alerts)
+            except Exception as e:
+                logger.exception(f"Помилка в основному циклі: {e}")
+                await asyncio.sleep(5)
+
+
+async def main():
+    # Перевірка конфігурації
+    missing = []
+    if not ALERTS_API_TOKEN:
+        missing.append("ALERTS_API_TOKEN")
+    if not TELEGRAM_BOT_TOKEN:
+        missing.append("TELEGRAM_BOT_TOKEN")
+    if not TELEGRAM_CHAT_ID:
+        missing.append("TELEGRAM_CHAT_ID")
+
+    if missing:
+        logger.error(
+            f"❌ Відсутні обов'язкові змінні оточення: {', '.join(missing)}"
+        )
+        logger.error("")
+        logger.error("Встановіть їх перед запуском бота:")
+        logger.error(
+            "  export ALERTS_API_TOKEN='ваш_токен_alerts_in_ua'"
+        )
+        logger.error(
+            "  export TELEGRAM_BOT_TOKEN='ваш_токен_telegram_бота'"
+        )
+        logger.error(
+            "  export TELEGRAM_CHAT_ID='id_вашого_чату'"
+        )
+        sys.exit(1)
+
+    monitor = AlertMonitor()
+    try:
+        await monitor.run()
+    except KeyboardInterrupt:
+        logger.info("Бот зупинено (Ctrl+C)")
+    finally:
+        await monitor.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
