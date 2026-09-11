@@ -1,0 +1,13 @@
+name: Keep Render Alive
+
+on:
+  schedule:
+    - cron: '*/5 * * * *' # Кожні 5 хвилин
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Web Service
+        run: curl -s https://air-raid-bot-berestyn.onrender.com > /dev/null
