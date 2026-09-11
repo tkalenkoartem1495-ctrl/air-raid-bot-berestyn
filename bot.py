@@ -188,8 +188,13 @@ class AlertMonitor:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
+            import ssl
+            import certifi
+            ssl_context = ssl.create_default_context(cafile=certifi.where())
+            connector = aiohttp.TCPConnector(ssl=ssl_context)
             self._session = aiohttp.ClientSession(
-                headers={"Authorization": f"Bearer {ALERTS_API_TOKEN}"}
+                headers={"Authorization": f"Bearer {ALERTS_API_TOKEN}"},
+                connector=connector
             )
         return self._session
 
