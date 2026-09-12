@@ -126,10 +126,6 @@ def build_alert_on_message(alert: dict) -> str:
     if notes:
         lines.append("")
         lines.append(f"📝 {notes}")
-
-    lines.append("")
-    lines.append("🔗 <a href='https://alerts.in.ua'>alerts.in.ua</a>")
-
     return "\n".join(lines)
 
 
@@ -168,10 +164,6 @@ def build_alert_off_message(alert: dict) -> str:
 
     if duration_str:
         lines.append(f"⏱ Тривалість: <b>{duration_str}</b>")
-
-    lines.append("")
-    lines.append("🔗 <a href='https://alerts.in.ua'>alerts.in.ua</a>")
-
     return "\n".join(lines)
 
 
