@@ -31,11 +31,19 @@ LIGHT_PATTERN = re.compile(r'(світл|свет|електроенерг)', re
 WATER_PATTERN = re.compile(r'(вод|водокачк)', re.IGNORECASE)
 ACTION_PATTERN = re.compile(r'(пропал|блимнув|появи|з\'яви|зник|\+|-)', re.IGNORECASE)
 
-PROMPT = """Прочитай цей батч повідомлень з місцевого чату. Твоя задача — знайти скарги на відключення світла або води і переформулювати їх у готові повідомлення. 
-Якщо є інформація про світло, напиши: '🔴 Відключення світла: [локація/деталі з повідомлень]'. 
-Якщо є інформація про воду, напиши: '🔵 Відключення води: [локація/деталі з повідомлень]'. 
-Якщо скарг немає взагалі, поверни лише слово 'NONE'.
-Якщо є інформація і про світло, і про воду, напиши обидва рядки."""
+PROMPT = """Ти моніториш скарги мешканців на відключення світла та води у місцевих чатах.
+Прочитай цей батч повідомлень. Знайди дійсні скарги на відключення світла або води і сформуй готові попередження.
+
+ПРАВИЛА:
+1. ВІДПОВІДАЙ ВИКЛЮЧНО УКРАЇНСЬКОЮ МОВОЮ (навіть якщо оригінальні повідомлення російською).
+2. Якщо є скарги на світло, створи одне зведене повідомлення і почни його з тегу [LIGHT].
+3. Якщо є скарги на воду, створи одне зведене повідомлення і почни його з тегу [WATER].
+4. Якщо є скарги і на світло, і на воду, поверни два окремі зведені повідомлення (кожне з нового рядка з відповідним тегом).
+5. Якщо скарг немає, поверни слово NONE.
+
+Приклад ідеальної відповіді:
+[LIGHT] 🔴 Відключення світла: район центру (світло блимнуло і зникло).
+[WATER] 🔵 Відключення води: 3-й мікрорайон (немає води вже годину)."""
 
 class UtilityMonitor:
     def __init__(self, client: TelegramClient):
@@ -63,9 +71,6 @@ class UtilityMonitor:
         has_water = bool(WATER_PATTERN.search(text))
         has_action = bool(ACTION_PATTERN.search(text))
         
-        # Щоб не реагувати на "води немає" без дії, хоча "немає" це не в списку, 
-        # користувач просив action words, або просто наявність світла/води.
-        # Для надійності: вимагаємо (світло або вода) + дія (хоча б мінус/плюс).
         return (has_light or has_water) and has_action
 
     async def _on_new_message(self, event):
@@ -104,33 +109,33 @@ class UtilityMonitor:
             full_prompt = f"{PROMPT}\n\nПовідомлення:\n{batch_text}"
 
             try:
-                # Виконуємо запит до Gemini
                 response = await asyncio.to_thread(self.model.generate_content, full_prompt)
                 result = response.text.strip()
                 
                 if result == "NONE" or not result:
                     continue
                     
-                # Розбираємо відповідь і відправляємо потрібним ботом
                 lines = result.split('\n')
                 for line in lines:
                     line = line.strip()
                     if not line:
                         continue
                         
-                    if "🔴" in line and self.light_bot:
+                    if "[LIGHT]" in line and self.light_bot:
+                        clean_text = line.replace("[LIGHT]", "").strip()
                         await self.light_bot.send_message(
                             chat_id=TELEGRAM_CHAT_ID,
-                            text=line
+                            text=clean_text
                         )
-                        logger.info(f"💡 Відправлено статус світла: {line}")
+                        logger.info(f"💡 Відправлено статус світла: {clean_text}")
                         
-                    elif "🔵" in line and self.water_bot:
+                    elif "[WATER]" in line and self.water_bot:
+                        clean_text = line.replace("[WATER]", "").strip()
                         await self.water_bot.send_message(
                             chat_id=TELEGRAM_CHAT_ID,
-                            text=line
+                            text=clean_text
                         )
-                        logger.info(f"💧 Відправлено статус води: {line}")
+                        logger.info(f"💧 Відправлено статус води: {clean_text}")
                         
             except Exception as e:
                 logger.error(f"Помилка обробки Gemini або відправки: {e}")
