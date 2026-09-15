@@ -1,2 +1,5 @@
 aiohttp>=3.9.0
 python-telegram-bot>=21.0
+telethon>=1.36.0
+deep-translator>=1.11.0
+certifi>=2023.0.0
