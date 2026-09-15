@@ -9,6 +9,7 @@ import asyncio
 import html
 import logging
 import os
+import re
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -80,6 +81,16 @@ class ChannelMonitor:
 
         # Перекладаємо
         translated = await self._translate(text)
+        
+        # Замінюємо стару назву на нову (зберігаючи базовий регістр)
+        def replacer(match):
+            word = match.group(0)
+            if word.istitle(): return "Берестин"
+            if word.isupper(): return "БЕРЕСТИН"
+            return "берестин"
+            
+        translated = re.sub(r'Красноград', replacer, translated, flags=re.IGNORECASE)
+
         translated_escaped = html.escape(translated)
 
         # Формуємо повідомлення
