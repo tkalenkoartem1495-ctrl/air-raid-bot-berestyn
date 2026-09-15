@@ -35,12 +35,8 @@ FILTER_KEYWORDS = ["красноград", "берестин"]
 class ChannelMonitor:
     """Моніторинг Telegram-каналів через userbot (Telethon)."""
 
-    def __init__(self):
-        self.client = TelegramClient(
-            StringSession(TELETHON_SESSION),
-            TELEGRAM_API_ID,
-            TELEGRAM_API_HASH,
-        )
+    def __init__(self, client: TelegramClient):
+        self.client = client
         self.bot = Bot(token=MONITOR_BOT_TOKEN)
         self.translator = GoogleTranslator(source="auto", target="uk")
 
@@ -105,16 +101,12 @@ class ChannelMonitor:
         except Exception as e:
             logger.error(f"Помилка відправки: {e}")
 
-    async def run(self):
+    async def start(self):
         """Запускає моніторинг каналів."""
         logger.info("=" * 50)
-        logger.info("📡 Монітор каналів запущено!")
+        logger.info("📡 Монітор новинних каналів запущено!")
         logger.info(
             f"📺 Канали: {', '.join('@' + c for c in MONITORED_CHANNELS)}"
         )
         logger.info(f"🔍 Ключові слова: {', '.join(FILTER_KEYWORDS)}")
         logger.info("=" * 50)
-
-        await self.client.start()
-        logger.info("✅ Telethon підключено")
-        await self.client.run_until_disconnected()

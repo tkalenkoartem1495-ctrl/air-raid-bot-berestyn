@@ -33,23 +33,27 @@ async def main():
         TELETHON_SESSION,
         MONITOR_BOT_TOKEN,
     )
+    from utility_bot import (
+        UtilityMonitor,
+        GEMINI_API_KEY,
+        LIGHT_BOT_TOKEN,
+        WATER_BOT_TOKEN,
+    )
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
 
     # ─── Перевірка конфігурації ───────────────────────────────
     missing = []
-    if not ALERTS_API_TOKEN:
-        missing.append("ALERTS_API_TOKEN")
-    if not TELEGRAM_BOT_TOKEN:
-        missing.append("TELEGRAM_BOT_TOKEN")
-    if not TELEGRAM_CHAT_ID:
-        missing.append("TELEGRAM_CHAT_ID")
-    if not TELEGRAM_API_ID:
-        missing.append("TELEGRAM_API_ID")
-    if not TELEGRAM_API_HASH:
-        missing.append("TELEGRAM_API_HASH")
-    if not TELETHON_SESSION:
-        missing.append("TELETHON_SESSION")
-    if not MONITOR_BOT_TOKEN:
-        missing.append("MONITOR_BOT_TOKEN")
+    if not ALERTS_API_TOKEN: missing.append("ALERTS_API_TOKEN")
+    if not TELEGRAM_BOT_TOKEN: missing.append("TELEGRAM_BOT_TOKEN")
+    if not TELEGRAM_CHAT_ID: missing.append("TELEGRAM_CHAT_ID")
+    if not TELEGRAM_API_ID: missing.append("TELEGRAM_API_ID")
+    if not TELEGRAM_API_HASH: missing.append("TELEGRAM_API_HASH")
+    if not TELETHON_SESSION: missing.append("TELETHON_SESSION")
+    if not MONITOR_BOT_TOKEN: missing.append("MONITOR_BOT_TOKEN")
+    if not GEMINI_API_KEY: missing.append("GEMINI_API_KEY")
+    if not LIGHT_BOT_TOKEN: missing.append("LIGHT_BOT_TOKEN")
+    if not WATER_BOT_TOKEN: missing.append("WATER_BOT_TOKEN")
 
     if missing:
         logger.error(
@@ -61,21 +65,36 @@ async def main():
     # Веб-сервер для keep-alive (Render)
     await init_web_server()
 
-    # Обидва монітори
-    alert_monitor = AlertMonitor()
-    channel_monitor = ChannelMonitor()
+    # Ініціалізуємо ОДИН спільний Telethon клієнт
+    client = TelegramClient(
+        StringSession(TELETHON_SESSION),
+        int(TELEGRAM_API_ID),
+        TELEGRAM_API_HASH,
+    )
+    await client.start()
+    logger.info("✅ Спільний Telethon клієнт підключено")
 
-    logger.info("🚀 Запускаємо обидва боти...")
+    # Ініціалізуємо всі боти
+    alert_monitor = AlertMonitor()
+    channel_monitor = ChannelMonitor(client)
+    utility_monitor = UtilityMonitor(client)
+
+    logger.info("🚀 Запускаємо всі боти...")
+
+    # Стартуємо налаштування/фонові задачі
+    await channel_monitor.start()
+    await utility_monitor.start()
 
     try:
         await asyncio.gather(
             alert_monitor.run(),
-            channel_monitor.run(),
+            client.run_until_disconnected()
         )
     except KeyboardInterrupt:
         logger.info("Боти зупинено (Ctrl+C)")
     finally:
         await alert_monitor.close()
+        await client.disconnect()
 
 
 if __name__ == "__main__":

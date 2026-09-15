@@ -334,22 +334,9 @@ class AlertMonitor:
             for alert in district_alerts:
                 self.active_alerts[alert["id"]] = alert
             if district_alerts:
-                logger.info(
-                    f"ℹ️  При запуску вже активні {len(district_alerts)} тривоги"
-                )
-                # Відправляємо стартове повідомлення
-                await self.send_telegram(
-                    f"🤖 <b>Бот запущено</b>\n\n"
-                    f"Моніторинг повітряної тривоги по Берестинському району.\n"
-                    f"Активних тривог: <b>{len(district_alerts)}</b>"
-                )
+                logger.info(f"ℹ️ При запуску вже активні {len(district_alerts)} тривоги (без сповіщення)")
             else:
-                logger.info("ℹ️  При запуску активних тривог немає")
-                await self.send_telegram(
-                    f"🤖 <b>Бот запущено</b>\n\n"
-                    f"Моніторинг повітряної тривоги по Берестинському району.\n"
-                    f"Наразі тривоги немає ✅"
-                )
+                logger.info("ℹ️ При запуску активних тривог немає")
 
         # Основний цикл
         while True:
