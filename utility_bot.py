@@ -15,6 +15,7 @@ from telethon import TelegramClient, events
 from telegram import Bot
 from telegram.constants import ParseMode
 import google.generativeai as genai
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,9 @@ WATER_BOT_TOKEN = os.environ.get("WATER_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 MONITORED_CHATS = ["krasnogradbezp", "krasnograd3serzem"]
+
+# Регулярки для ШИРОКОГО базового фільтрування (щоб не витрачати ліміти Gemini на пусті розмови)
+BROAD_PATTERN = re.compile(r'(світл|свет|електроенерг|вод|водокачк)', re.IGNORECASE)
 
 PROMPT = """Ти моніториш скарги мешканців на відключення світла та води у місцевих чатах.
 Прочитай цей батч повідомлень (зібраний за останню хвилину). Знайди дійсні скарги або питання про відключення світла чи води і сформуй готові попередження.
@@ -49,7 +53,7 @@ class UtilityMonitor:
         
         if GEMINI_API_KEY:
             genai.configure(api_key=GEMINI_API_KEY)
-            self.model = genai.GenerativeModel("gemini-3.6-flash")
+            self.model = genai.GenerativeModel("gemini-flash-latest")
         else:
             self.model = None
 
@@ -61,7 +65,9 @@ class UtilityMonitor:
             self._on_new_message
         )
 
-
+    def _matches_filter(self, text: str) -> bool:
+        """Дуже широкий фільтр, пропускає всі повідомлення де є бодай згадка води/світла."""
+        return bool(BROAD_PATTERN.search(text))
 
     async def _on_new_message(self, event):
         """Обробник нових повідомлень у комунальних чатах."""
@@ -75,10 +81,12 @@ class UtilityMonitor:
         if chat_username not in MONITORED_CHATS:
             return
 
-        chat = await event.get_chat()
+        if not self._matches_filter(text):
+            return
+
         chat_title = getattr(chat, "title", "Чат")
 
-        logger.info(f"💧/💡 Знайдено скаргу в {chat_title}: {text[:50]}...")
+        logger.info(f"💧/💡 Знайдено можливу скаргу в {chat_title}: {text[:50]}...")
         
         async with self.lock:
             self.batch.append(f"[{chat_title}] {text}")
