@@ -41,8 +41,8 @@ class ChannelMonitor:
         self.bot = Bot(token=MONITOR_BOT_TOKEN)
         self.translator = GoogleTranslator(source="auto", target="uk")
 
-        # Реєструємо обробник нових повідомлень
-        self.client.on(events.NewMessage(chats=MONITORED_CHANNELS))(
+        # Реєструємо обробник нових повідомлень (без жорсткого фільтра по chats, щоб уникнути проблем з кешем)
+        self.client.on(events.NewMessage)(
             self._on_new_message
         )
 
@@ -64,6 +64,13 @@ class ChannelMonitor:
         """Обробник нових повідомлень у каналах."""
         text = event.raw_text
         if not text:
+            return
+            
+        chat = await event.get_chat()
+        channel_username = getattr(chat, "username", "")
+        
+        # Перевірка, чи це потрібний канал
+        if channel_username not in MONITORED_CHANNELS:
             return
 
         if not self._matches_filter(text):

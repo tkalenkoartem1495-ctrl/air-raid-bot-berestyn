@@ -61,8 +61,8 @@ class UtilityMonitor:
         self.batch = []
         self.lock = asyncio.Lock()
 
-        # Реєструємо обробник нових повідомлень
-        self.client.on(events.NewMessage(chats=MONITORED_CHATS))(
+        # Реєструємо обробник нових повідомлень (перевірка каналів буде всередині)
+        self.client.on(events.NewMessage)(
             self._on_new_message
         )
 
@@ -78,6 +78,12 @@ class UtilityMonitor:
         """Обробник нових повідомлень у комунальних чатах."""
         text = event.raw_text
         if not text:
+            return
+            
+        chat = await event.get_chat()
+        chat_username = getattr(chat, "username", "")
+        
+        if chat_username not in MONITORED_CHATS:
             return
 
         if not self._matches_filter(text):
