@@ -53,7 +53,6 @@ class RailwayMonitor:
             # Шукаємо згадку Берестин або Красноград
             if re.search(r'(Берестин|Красноград)', text, re.IGNORECASE):
                 clean_text = self._replace_city_name(text)
-                clean_text = f"🚂 **Укрзалізниця повідомляє:**\n\n{clean_text}"
                 
                 logger.info(f"🚂 Знайдено повідомлення від Укрзалізниці! Відправляємо...")
                 try:
