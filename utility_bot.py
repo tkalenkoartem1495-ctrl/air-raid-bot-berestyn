@@ -36,20 +36,24 @@ PROMPT = """Ти моніториш скарги мешканців на від�
 1. ВІДПОВІДАЙ ВИКЛЮЧНО УКРАЇНСЬКОЮ МОВОЮ (навіть якщо оригінали російською).
 2. Завжди використовуй назву міста Берестин (замість Красноград) у всіх відмінках. Ніколи не пиши "Красноград".
 3. Якщо повідомлень багато — узагальнюй їх. Об'єднуй різні вулиці та райони в одне загальне попередження.
-4. Якщо є скарги на світло, створи ОДНЕ зведене повідомлення і почни його з тегу [LIGHT].
-5. Якщо є скарги на воду, створи ОДНЕ зведене повідомлення і почни його з тегу [WATER].
-6. Питання типу "Що з водою?", "Коли дадуть світло?" ВВАЖАЙ скаргою на відключення. Сприймай це як факт відключення.
-7. Якщо скарг взагалі немає, поверни слово NONE.
+4. Питання типу "Що з водою?", "Коли дадуть світло?" ВВАЖАЙ скаргою на відключення. Сприймай це як факт відключення.
+5. Якщо скарг взагалі немає, поверни слово NONE.
 
 Приклад ідеальної відповіді:
 [LIGHT] 🔴 Відключення світла: район центру та вул. Миру (немає світла); 3-й мікрорайон (люди питають коли дадуть).
 [WATER] 🔵 Відключення води: 3-й мікрорайон (немає води вже годину)."""
+
+import time
 
 class UtilityMonitor:
     def __init__(self, client: TelegramClient):
         self.client = client
         self.light_bot = Bot(token=LIGHT_BOT_TOKEN) if LIGHT_BOT_TOKEN else None
         self.water_bot = Bot(token=WATER_BOT_TOKEN) if WATER_BOT_TOKEN else None
+        
+        # Таймери блокування (cooldown) у секундах (30 хвилин = 1800 сек)
+        self.light_cooldown_until = 0
+        self.water_cooldown_until = 0
         
         if GEMINI_API_KEY:
             genai.configure(api_key=GEMINI_API_KEY)
@@ -102,9 +106,19 @@ class UtilityMonitor:
         while True:
             await asyncio.sleep(60)
             
+            now = time.time()
+            light_active = now >= self.light_cooldown_until
+            water_active = now >= self.water_cooldown_until
+            
             async with self.lock:
                 if not self.batch:
                     continue
+                    
+                # Якщо обидва боти на кулдауні, просто викидаємо повідомлення
+                if not light_active and not water_active:
+                    self.batch.clear()
+                    continue
+                    
                 messages_to_process = list(self.batch)
                 self.batch.clear()
 
@@ -112,8 +126,19 @@ class UtilityMonitor:
                 logger.error("GEMINI_API_KEY не задано! Пропускаю батч.")
                 continue
 
+            dynamic_prompt = PROMPT + "\n\nДИНАМІЧНІ ПРАВИЛА (ВАЖЛИВО!):\n"
+            if light_active:
+                dynamic_prompt += "- Якщо є скарги на світло, створи ОДНЕ зведене повідомлення і почни його з тегу [LIGHT].\n"
+            else:
+                dynamic_prompt += "- ІГНОРУЙ БУДЬ-ЯКІ СКАРГИ НА СВІТЛО. Інформація вже опублікована. Не генеруй [LIGHT].\n"
+                
+            if water_active:
+                dynamic_prompt += "- Якщо є скарги на воду, створи ОДНЕ зведене повідомлення і почни його з тегу [WATER].\n"
+            else:
+                dynamic_prompt += "- ІГНОРУЙ БУДЬ-ЯКІ СКАРГИ НА ВОДУ. Інформація вже опублікована. Не генеруй [WATER].\n"
+
             batch_text = "\n---\n".join(messages_to_process)
-            full_prompt = f"{PROMPT}\n\nПовідомлення:\n{batch_text}"
+            full_prompt = f"{dynamic_prompt}\n\nПовідомлення:\n{batch_text}"
 
             try:
                 response = await asyncio.to_thread(self.model.generate_content, full_prompt)
@@ -128,7 +153,7 @@ class UtilityMonitor:
                     if not line:
                         continue
                         
-                    if "[LIGHT]" in line and self.light_bot:
+                    if "[LIGHT]" in line and self.light_bot and light_active:
                         clean_text = line.replace("[LIGHT]", "").strip()
                         clean_text = self._replace_city_name(clean_text)
                         await self.light_bot.send_message(
@@ -136,8 +161,9 @@ class UtilityMonitor:
                             text=clean_text
                         )
                         logger.info(f"💡 Відправлено статус світла: {clean_text}")
+                        self.light_cooldown_until = time.time() + 1800
                         
-                    elif "[WATER]" in line and self.water_bot:
+                    elif "[WATER]" in line and self.water_bot and water_active:
                         clean_text = line.replace("[WATER]", "").strip()
                         clean_text = self._replace_city_name(clean_text)
                         await self.water_bot.send_message(
@@ -145,6 +171,7 @@ class UtilityMonitor:
                             text=clean_text
                         )
                         logger.info(f"💧 Відправлено статус води: {clean_text}")
+                        self.water_cooldown_until = time.time() + 1800
                         
             except Exception as e:
                 logger.error(f"Помилка обробки Gemini або відправки: {e}")
