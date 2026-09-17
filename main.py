@@ -39,6 +39,10 @@ async def main():
         LIGHT_BOT_TOKEN,
         WATER_BOT_TOKEN,
     )
+    from railway_bot import (
+        RailwayMonitor,
+        RAILWAY_BOT_TOKEN,
+    )
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 
@@ -54,6 +58,7 @@ async def main():
     if not GEMINI_API_KEY: missing.append("GEMINI_API_KEY")
     if not LIGHT_BOT_TOKEN: missing.append("LIGHT_BOT_TOKEN")
     if not WATER_BOT_TOKEN: missing.append("WATER_BOT_TOKEN")
+    if not RAILWAY_BOT_TOKEN: missing.append("RAILWAY_BOT_TOKEN")
 
     if missing:
         logger.error(
@@ -78,6 +83,7 @@ async def main():
     alert_monitor = AlertMonitor()
     channel_monitor = ChannelMonitor(client)
     utility_monitor = UtilityMonitor(client)
+    railway_monitor = RailwayMonitor(client)
 
     logger.info("🚀 Запускаємо всі боти...")
 
