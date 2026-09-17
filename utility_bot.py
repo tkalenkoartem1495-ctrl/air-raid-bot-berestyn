@@ -34,11 +34,12 @@ PROMPT = """Ти моніториш скарги мешканців на від�
 
 ПРАВИЛА:
 1. ВІДПОВІДАЙ ВИКЛЮЧНО УКРАЇНСЬКОЮ МОВОЮ (навіть якщо оригінали російською).
-2. Якщо повідомлень багато — узагальнюй їх. Об'єднуй різні вулиці та райони в одне загальне попередження.
-3. Якщо є скарги на світло, створи ОДНЕ зведене повідомлення і почни його з тегу [LIGHT].
-4. Якщо є скарги на воду, створи ОДНЕ зведене повідомлення і почни його з тегу [WATER].
-5. Питання типу "Що з водою?", "Коли дадуть світло?" ВВАЖАЙ скаргою на відключення. Сприймай це як факт відключення.
-6. Якщо скарг взагалі немає, поверни слово NONE.
+2. Завжди використовуй назву міста Берестин (замість Красноград) у всіх відмінках. Ніколи не пиши "Красноград".
+3. Якщо повідомлень багато — узагальнюй їх. Об'єднуй різні вулиці та райони в одне загальне попередження.
+4. Якщо є скарги на світло, створи ОДНЕ зведене повідомлення і почни його з тегу [LIGHT].
+5. Якщо є скарги на воду, створи ОДНЕ зведене повідомлення і почни його з тегу [WATER].
+6. Питання типу "Що з водою?", "Коли дадуть світло?" ВВАЖАЙ скаргою на відключення. Сприймай це як факт відключення.
+7. Якщо скарг взагалі немає, поверни слово NONE.
 
 Приклад ідеальної відповіді:
 [LIGHT] 🔴 Відключення світла: район центру та вул. Миру (немає світла); 3-й мікрорайон (люди питають коли дадуть).
@@ -83,6 +84,19 @@ class UtilityMonitor:
         async with self.lock:
             self.batch.append(f"[{chat_title}] {text}")
 
+    def _replace_city_name(self, text: str) -> str:
+        """Замінює Красноград на Берестин, зберігаючи регістр першої літери."""
+        def replacer(match):
+            word = match.group(0)
+            if word.istitle():
+                return "Берестин"
+            elif word.isupper():
+                return "БЕРЕСТИН"
+            else:
+                return "берестин"
+        
+        return re.sub(r'Красноград', replacer, text, flags=re.IGNORECASE)
+
     async def _process_batch_loop(self):
         """Фонова задача, яка щохвилини відправляє батч в Gemini."""
         while True:
@@ -116,6 +130,7 @@ class UtilityMonitor:
                         
                     if "[LIGHT]" in line and self.light_bot:
                         clean_text = line.replace("[LIGHT]", "").strip()
+                        clean_text = self._replace_city_name(clean_text)
                         await self.light_bot.send_message(
                             chat_id=TELEGRAM_CHAT_ID,
                             text=clean_text
@@ -124,6 +139,7 @@ class UtilityMonitor:
                         
                     elif "[WATER]" in line and self.water_bot:
                         clean_text = line.replace("[WATER]", "").strip()
+                        clean_text = self._replace_city_name(clean_text)
                         await self.water_bot.send_message(
                             chat_id=TELEGRAM_CHAT_ID,
                             text=clean_text
