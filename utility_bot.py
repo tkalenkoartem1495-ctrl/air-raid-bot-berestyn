@@ -52,7 +52,7 @@ class UtilityMonitor:
         
         if GEMINI_API_KEY:
             genai.configure(api_key=GEMINI_API_KEY)
-            self.model = genai.GenerativeModel("gemini-flash-latest")
+            self.model = genai.GenerativeModel("gemini-flash-lite-latest")
         else:
             self.model = None
 
