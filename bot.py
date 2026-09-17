@@ -238,17 +238,19 @@ class AlertMonitor:
         return result
 
     async def send_telegram(self, text: str):
-        """Відправляє повідомлення в Telegram чат."""
-        try:
-            await self.bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-            )
-            logger.info("Повідомлення відправлено в Telegram")
-        except Exception as e:
-            logger.error(f"Помилка відправки в Telegram: {e}")
+        """Відправляє повідомлення в Telegram чат та в особисті повідомлення."""
+        targets = [TELEGRAM_CHAT_ID, 395497075]  # Основний чат та особистий ID @vvvvvvvvvvvvv2002
+        for target in targets:
+            try:
+                await self.bot.send_message(
+                    chat_id=target,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+                logger.info(f"Повідомлення відправлено в Telegram (chat_id: {target})")
+            except Exception as e:
+                logger.error(f"Помилка відправки в Telegram (chat_id: {target}): {e}")
 
     async def process_alerts(self, alerts: list[dict]):
         """Обробляє нові та завершені тривоги."""
