@@ -40,7 +40,14 @@ class RailwayMonitor:
         chat = await event.get_chat()
         chat_username = getattr(chat, "username", "")
         
+        # Додаємо жорстку перевірку по ID на випадок якщо кеш Telethon не віддає username
+        is_monitored = False
         if chat_username and chat_username.lower() in [c.lower() for c in MONITORED_CHANNELS]:
+            is_monitored = True
+        elif getattr(event, "chat_id", 0) == -1002352590134:
+            is_monitored = True
+            
+        if is_monitored:
             text = event.raw_text
             
             # Шукаємо згадку Берестин або Красноград
