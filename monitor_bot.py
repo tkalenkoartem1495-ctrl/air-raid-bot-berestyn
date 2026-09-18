@@ -26,8 +26,14 @@ TELETHON_SESSION = os.environ.get("TELETHON_SESSION", "")
 MONITOR_BOT_TOKEN = os.environ.get("MONITOR_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# Канали для моніторингу
-MONITORED_CHANNELS = ["tlknewsua", "radar_kharkov"]
+# Канали для моніторингу та їхні ID для надійності
+MONITORED_CHANNELS = ["tlknewsua", "radar_kharkov", "nochnojdozorkh", "monitor1654"]
+MONITORED_CHANNEL_IDS = [
+    -1001673474387,  # tlknewsua
+    -1001850203289,  # radar_kharkov
+    -1001667056986,  # NochnojDozorKh
+    -1001104455802,  # monitor1654
+]
 
 # Ключові слова для фільтрації (регістронезалежно)
 FILTER_KEYWORDS = ["красноград", "берестин"]
@@ -68,17 +74,22 @@ class ChannelMonitor:
             
         chat = await event.get_chat()
         channel_username = getattr(chat, "username", "")
+        chat_id = getattr(event, "chat_id", 0)
         
-        # Перевірка, чи це потрібний канал
-        if channel_username not in MONITORED_CHANNELS:
+        # Перевірка, чи це потрібний канал (по username або по ID)
+        is_monitored = False
+        if channel_username and channel_username.lower() in [c.lower() for c in MONITORED_CHANNELS]:
+            is_monitored = True
+        elif chat_id in MONITORED_CHANNEL_IDS:
+            is_monitored = True
+            
+        if not is_monitored:
             return
 
         if not self._matches_filter(text):
             return
 
-        # Отримуємо інфо про канал
-        chat = await event.get_chat()
-        channel_username = getattr(chat, "username", "")
+        # Отримуємо інфо про канал (для логів та підпису)
         channel_title = getattr(chat, "title", "Невідомий канал")
 
         logger.info(
