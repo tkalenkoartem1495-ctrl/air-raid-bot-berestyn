@@ -52,6 +52,11 @@ class RailwayMonitor:
             
             # Шукаємо згадку Берестин або Красноград
             if re.search(r'(Берестин|Красноград)', text, re.IGNORECASE):
+                # Відсікаємо зайвий текст про евакуацію
+                cutoff_trigger = "❗️ У разі підвищеної небезпеки поїзд буде зупинено."
+                if cutoff_trigger in text:
+                    text = text.split(cutoff_trigger)[0].strip()
+                    
                 clean_text = self._replace_city_name(text)
                 
                 logger.info(f"🚂 Знайдено повідомлення від Укрзалізниці! Відправляємо...")
