@@ -43,6 +43,10 @@ async def main():
         RailwayMonitor,
         RAILWAY_BOT_TOKEN,
     )
+    from discount_bot import (
+        DiscountMonitor,
+        DISCOUNT_BOT_TOKEN,
+    )
     from dawn_bot import DawnBot
     
     from telethon import TelegramClient
@@ -61,6 +65,7 @@ async def main():
     if not LIGHT_BOT_TOKEN: missing.append("LIGHT_BOT_TOKEN")
     if not WATER_BOT_TOKEN: missing.append("WATER_BOT_TOKEN")
     if not RAILWAY_BOT_TOKEN: missing.append("RAILWAY_BOT_TOKEN")
+    if not DISCOUNT_BOT_TOKEN: missing.append("DISCOUNT_BOT_TOKEN")
 
     if missing:
         logger.error(
@@ -86,6 +91,7 @@ async def main():
     channel_monitor = ChannelMonitor(client)
     utility_monitor = UtilityMonitor(client)
     railway_monitor = RailwayMonitor(client)
+    discount_monitor = DiscountMonitor(client)
     dawn_bot = DawnBot()
 
     logger.info("🚀 Запускаємо всі боти...")
