@@ -104,9 +104,9 @@ class UtilityMonitor:
         return re.sub(r'Красноград', replacer, text, flags=re.IGNORECASE)
 
     async def _process_batch_loop(self):
-        """Фонова задача, яка щохвилини відправляє батч в Gemini."""
+        """Фонова задача, яка кожні 2 хвилини відправляє батч в Gemini."""
         while True:
-            await asyncio.sleep(60)
+            await asyncio.sleep(120)
             
             now = time.time()
             light_active = now >= self.light_cooldown_until
