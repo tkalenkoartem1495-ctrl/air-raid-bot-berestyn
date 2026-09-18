@@ -23,22 +23,21 @@ class DiscountMonitor:
         self.client.on(events.NewMessage)(self._on_new_message)
 
     def _process_text(self, text: str) -> str:
-        if "#АТБ" not in text:
+        if not text or "#АТБ" not in text:
             return ""
             
-        # Відсікаємо все, що нижче #АТБ
-        parts = text.split("#АТБ")
-        clean_text = parts[0] + "#АТБ"
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        term_line = ""
         
-        # Видаляємо конкретні фрази (з урахуванням можливих відмінностей у пробілах)
-        clean_text = re.sub(r"\*?\*?\(ВСІ СТОРІНКИ ГАЗЕТИ В КОМЕНТАРЯХ.*?\)\s*\*?\*?", "", clean_text, flags=re.IGNORECASE)
-        
-        # Можливий варіант без пробілу або інший символ стрілки, але почнемо з точного збігу
-        
-        # Забираємо зайві порожні рядки
-        clean_text = re.sub(r'\n{3,}', '\n\n', clean_text)
-        
-        return clean_text.strip()
+        for line in lines:
+            if "термін дії" in line.lower():
+                term_line = line
+                break
+                
+        if term_line:
+            return f"{term_line}\n#АТБ"
+        else:
+            return "#АТБ"
 
     async def _on_new_message(self, event):
         """Обробник нових повідомлень з каналу знижок."""
