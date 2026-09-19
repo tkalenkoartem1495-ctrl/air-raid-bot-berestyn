@@ -38,6 +38,43 @@ class DawnBot:
             
         self.last_posted_date = None
 
+    def get_weather(self):
+        import urllib.request
+        import json
+        import ssl
+        
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        url = "https://api.open-meteo.com/v1/forecast?latitude=49.37&longitude=35.45&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=Europe%2FKyiv&forecast_days=1"
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, context=ctx) as response:
+                data = json.loads(response.read().decode())
+                
+            daily = data.get('daily', {})
+            if daily:
+                max_temp = daily.get('temperature_2m_max', [None])[0]
+                min_temp = daily.get('temperature_2m_min', [None])[0]
+                precip = daily.get('precipitation_sum', [None])[0]
+                code = daily.get('weathercode', [None])[0]
+                
+                weather_desc = "ясно"
+                if code in [1, 2, 3]: weather_desc = "мінлива хмарність"
+                elif code in [45, 48]: weather_desc = "туман"
+                elif code in [51, 53, 55, 56, 57]: weather_desc = "мряка"
+                elif code in [61, 63, 65, 66, 67]: weather_desc = "дощ"
+                elif code in [71, 73, 75, 77]: weather_desc = "сніг"
+                elif code in [80, 81, 82]: weather_desc = "злива"
+                elif code in [95, 96, 99]: weather_desc = "гроза"
+                
+                return f"Температура від {min_temp}°C до {max_temp}°C, {weather_desc}, опади {precip} мм."
+        except Exception as e:
+            logger.error(f"Weather error: {e}")
+        return "мінлива погода (точний прогноз зараз недоступний)"
+
+
     async def _post_morning_message(self):
         """Формує і відправляє ранкове повідомлення."""
         now = datetime.now(self.tz)
@@ -45,30 +82,34 @@ class DawnBot:
         day_of_week = now.strftime("%A") # English day, Gemini handles translation fine
         
         history_fact = self.history.get(date_key)
+        weather_fact = self.get_weather()
         
         if history_fact:
             prompt = (
-                "Напиши привітання для жителів Берестина у місцевому телеграм-чаті "
-                "(згадай поточний день тижня) та актуальний прогноз погоди для Берестина на сьогодні. "
+                f"Напиши привітання для жителів Берестина у місцевому телеграм-чаті. "
+                f"Сьогодні {day_of_week}. "
+                f"ОБОВ'ЯЗКОВО використай ці точні дані для прогнозу погоди: [{weather_fact}]. "
+                "Не вигадуй свою погоду! "
                 "Пиши живою мовою. Приклад бажаного привітання: '🌅 Доброго ранку, Берестин! "
                 "Новий день — новий шанс зробити щось хороше, посміхнутися сусіду і випити каву не поспішаючи. "
-                "Нехай сьогодні щастить у справах, а настрій буде під стать серпневому сонцю. Гарного вам дня! ☕️🇺🇦'. "
+                f"Сьогодні очікується [погода]. Нехай сьогодні щастить у справах. Гарного вам дня! ☕️🇺🇦'. "
                 "Видай тільки цей згенерований текст."
             )
         else:
             prompt = (
-                "Напиши привітання для жителів Берестина у місцевому телеграм-чаті "
-                "(згадай поточний день тижня) та актуальний прогноз погоди для Берестина на сьогодні. "
+                f"Напиши привітання для жителів Берестина у місцевому телеграм-чаті. "
+                f"Сьогодні {day_of_week}. "
+                f"ОБОВ'ЯЗКОВО використай ці точні дані для прогнозу погоди: [{weather_fact}]. "
+                "Не вигадуй свою погоду! "
                 "Після цього, нижче, додай цікавий (але не іронічний) місцевий гороскоп-пораду на сьогодні "
                 "для 3 знаків зодіаку. Приклад бажаного привітання: '🌅 Доброго ранку, Берестин! "
-                "Новий день — новий шанс зробити щось хороше, посміхнутися сусіду і випити каву не поспішаючи. "
-                "Нехай сьогодні щастить у справах, а настрій буде під стать серпневому сонцю. Гарного вам дня! ☕️🇺🇦'. "
+                f"Сьогодні очікується [погода]. Нехай щастить у справах! Гарного вам дня! ☕️🇺🇦'. "
                 "Приклад бажаного формату гороскопу: '✨ Гороскоп на сьогодні ♌️ Лев — день сприятливий для рішучих кроків: "
                 "те, що відкладали кілька днів, сьогодні піде як по маслу. Зірки радять не боятися взяти ініціативу в свої руки. "
                 "♍️ Діва — трохи метушливий день, але саме та метушня, яка приносить результат. Ввечері варто дати собі спокій "
                 "і не планувати нічого важливого — просто відпочити. ♎️ Терези — гарний день для спілкування і домовленостей: "
                 "те, що не вдавалося пояснити раніше, сьогодні знайде розуміння. Настрій буде легким, тримайтеся цього стану.' "
-                "Видай тільки готовий текст повідомлення."
+                "Видай тільки готовий текст повідомлення, використовуй красиві емодзі."
             )
 
         
@@ -101,8 +142,7 @@ class DawnBot:
             # Звернення до Gemini (якщо квота вичерпана, видасть помилку, але бот спробує знову завтра)
             response = await asyncio.to_thread(
                 self.model.generate_content, 
-                prompt, 
-                tools="google_search_retrieval"
+                prompt
             )
             generated_text = response.text.strip()
         except Exception as e:
