@@ -12,7 +12,7 @@ import google.generativeai as genai
 
 logger = logging.getLogger(__name__)
 
-RENT_BOT_TOKEN = os.environ.get("RENT_BOT_TOKEN", os.environ.get("DAWN_BOT_TOKEN", "")) # Use DAWN token or same token if user didn't specify. Wait, user didn't provide a token for Rent bot. I'll use DAWN_BOT_TOKEN as a fallback or expect RENT_BOT_TOKEN.
+RENT_BOT_TOKEN = os.environ.get("RENT_BOT_TOKEN", "8901603097:AAHcs2yGN-UPK675yy_3nzK-cEqj6J7iiqE") # Use DAWN token or same token if user didn't specify. Wait, user didn't provide a token for Rent bot. I'll use DAWN_BOT_TOKEN as a fallback or expect RENT_BOT_TOKEN.
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "-1001110859952")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
@@ -153,17 +153,27 @@ class RentBot:
         return output
 
     async def _scheduler_loop(self):
-        """Фонова задача для перевірки часу та публікації посту о 20:00."""
+        """Фонова задача: старт збору о 19:50, публікація рівно о 20:00."""
         while True:
             now = datetime.now(self.tz)
             date_key = now.strftime("%m-%d")
             
-            # Якщо зараз 20:00 (між 20:00 і 20:01) і ми ще не постили сьогодні
-            if now.hour == 20 and now.minute == 0 and self.last_posted_date != date_key:
+            # Прокидаємося о 19:50 для підготовки
+            if now.hour == 19 and now.minute == 50 and self.last_posted_date != date_key:
                 if self.bot and self.model:
                     try:
-                        logger.info("Починаємо збір та обробку оренди...")
+                        logger.info("19:50 - Починаємо збір та обробку оренди (маємо 10 хв в запасі)...")
                         report = await self._fetch_and_process()
+                        
+                        logger.info("Звіт готовий. Очікуємо 20:00 для публікації...")
+                        # Чекаємо рівно до 20:00
+                        while True:
+                            wait_now = datetime.now(self.tz)
+                            if wait_now.hour == 20 and wait_now.minute >= 0:
+                                break
+                            await asyncio.sleep(10)
+                            
+                        logger.info("20:00 - Публікуємо звіт про оренду!")
                         await self.bot.send_message(
                             chat_id=TELEGRAM_CHAT_ID,
                             text=report,
@@ -172,7 +182,7 @@ class RentBot:
                         logger.info("✅ Пост про оренду успішно опубліковано!")
                         self.last_posted_date = date_key
                     except Exception as e:
-                        logger.error(f"Помилка публікації оренди: {e}")
+                        logger.error(f"Помилка підготовки/публікації оренди: {e}")
             
             await asyncio.sleep(30)
 
