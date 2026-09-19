@@ -30,8 +30,12 @@ class DiscountMonitor:
         lines = [line.strip() for line in text.split('\n') if line.strip()]
         term_line = ""
         
+        # Шукаємо рядок з датою/терміном дії за допомогою регулярного виразу
+        # Розпізнає: "термін дії", "діє до", "до 04.08", "16.09-22.09", "з 10.05 по 15.05" і т.д.
+        pattern = re.compile(r'(?i)(термін дії|діє до|\bдо\s+\d{1,2}\.\d{2}|\b\d{1,2}\.\d{2}\s*(?:-|по|до)\s*\d{1,2}\.\d{2}|\bз\s+\d{1,2}\.\d{2})')
+        
         for line in lines:
-            if "термін дії" in line.lower():
+            if pattern.search(line):
                 term_line = line
                 break
                 
