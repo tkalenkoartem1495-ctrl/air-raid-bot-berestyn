@@ -33,14 +33,13 @@ class JobBot:
         self.last_posted_date = None
 
     async def _fetch_and_process(self):
-        """Збирає повідомлення, обробляє через Gemini і формує звіт про роботу."""
         now = datetime.now(self.tz)
         
         # Від 17:30 попереднього дня до 17:20 поточного
         end_time = now.replace(hour=17, minute=20, second=0, microsecond=0)
         start_time = (end_time - timedelta(days=1)).replace(hour=17, minute=30)
         
-        logger.info(f"Збираємо вакансії від {start_time} до {end_time}")
+        logger.info(f"Збираємо вакансії (та картинки) від {start_time} до {end_time}")
         
         messages_data = []
         for chat in CHATS:
@@ -52,7 +51,10 @@ class JobBot:
                     if msg_date > end_time:
                         continue
                         
-                    if not msg.raw_text or len(msg.raw_text.strip()) < 5:
+                    has_photo = msg.photo is not None
+                    raw_text = msg.raw_text or ""
+                    
+                    if len(raw_text.strip()) < 5 and not has_photo:
                         continue
                         
                     sender = await msg.get_sender()
@@ -65,10 +67,18 @@ class JobBot:
                             if getattr(sender, "last_name", None):
                                 username += f" {sender.last_name}"
                                 
+                    photo_bytes = None
+                    if has_photo:
+                        try:
+                            photo_bytes = await self.client.download_media(msg, file=bytes)
+                        except Exception as e:
+                            logger.error(f"Не вдалося завантажити фото: {e}")
+                            
                     messages_data.append({
                         "user": username,
-                        "text": msg.raw_text[:300].replace('\n', ' '),
-                        "link": f"https://t.me/{chat}/{msg.id}"
+                        "text": raw_text[:300].replace('\n', ' '),
+                        "link": f"https://t.me/{chat}/{msg.id}",
+                        "photo_bytes": photo_bytes
                     })
             except Exception as e:
                 logger.error(f"Помилка чату {chat} (Робота): {e}")
@@ -76,8 +86,42 @@ class JobBot:
         if not messages_data:
             return "За останню добу оголошень про роботу не знайдено."
             
-        batch_size = 50
-        batches = [messages_data[i:i + batch_size] for i in range(0, len(messages_data), batch_size)]
+        # --- OCR PASS ---
+        msgs_with_photos = [m for m in messages_data if m.get("photo_bytes")]
+        logger.info(f"📸 Знайдено повідомлень з фото для OCR: {len(msgs_with_photos)}")
+        
+        batch_size_ocr = 5
+        for i in range(0, len(msgs_with_photos), batch_size_ocr):
+            batch = msgs_with_photos[i:i + batch_size_ocr]
+            
+            contents = [
+                "Read the text from these images exactly in the order they are provided. Return ONLY a valid JSON array of strings, where each string is the recognized text from the corresponding image. Example format: [\"text from image 1\", \"text from image 2\"]. If there is no text in an image, use an empty string \"\" for that index. No markdown!"
+            ]
+            for m in batch:
+                contents.append({"mime_type": "image/jpeg", "data": m["photo_bytes"]})
+                
+            try:
+                response = await asyncio.to_thread(self.model.generate_content, contents)
+                resp_text = response.text.strip()
+                if resp_text.startswith("```json"): resp_text = resp_text[7:]
+                if resp_text.endswith("```"): resp_text = resp_text[:-3]
+                
+                texts = json.loads(resp_text.strip())
+                for m, txt in zip(batch, texts):
+                    if txt.strip():
+                        m["text"] = f"{m['text']} [Текст на фото: {txt.strip()}]".strip()
+            except Exception as e:
+                logger.error(f"OCR Error for batch: {e}")
+                
+        # Clean up photo_bytes to save memory
+        for m in messages_data:
+            if "photo_bytes" in m:
+                del m["photo_bytes"]
+                
+        # --- CATEGORIZATION PASS ---
+        logger.info(f"🧠 Фільтруємо вакансії (всього {len(messages_data)} повідомлень)...")
+        batch_size_cat = 50
+        batches = [messages_data[i:i + batch_size_cat] for i in range(0, len(messages_data), batch_size_cat)]
         
         vacancies = []
         seeking = []
@@ -121,7 +165,6 @@ class JobBot:
             except Exception as e:
                 logger.error(f"Gemini batch error (Робота): {e}")
                 
-        # Deduplicate
         def dedup(arr):
             seen = set()
             res = []
@@ -159,12 +202,10 @@ class JobBot:
         return output
 
     async def _scheduler_loop(self):
-        """Фонова задача: старт збору о 17:20, публікація рівно о 17:30."""
         while True:
             now = datetime.now(self.tz)
             date_key = now.strftime("%m-%d")
             
-            # Прокидаємося о 17:20 для підготовки
             if now.hour == 17 and now.minute == 20 and self.last_posted_date != date_key:
                 if self.bot and self.model:
                     try:
@@ -193,7 +234,6 @@ class JobBot:
             await asyncio.sleep(30)
 
     async def start(self):
-        """Запускає фонову перевірку розкладу."""
         logger.info("=" * 50)
         logger.info("💼 Бот 'Робота / Вакансії' запущено!")
         logger.info("=" * 50)
