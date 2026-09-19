@@ -88,6 +88,14 @@ class ChannelMonitor:
 
         if not self._matches_filter(text):
             return
+            
+        # Ігноруємо повідомлення про початок/відбій тривоги тільки для NochnojDozorKh
+        if chat_id == -1001667056986 or (channel_username and channel_username.lower() == "nochnojdozorkh"):
+            text_lower = text.lower()
+            alert_keywords = ["відбій", "отбой", "тривог", "тревог"]
+            if any(kw in text_lower for kw in alert_keywords):
+                logger.info("🚫 Ігноруємо повідомлення про тривогу/відбій з NochnojDozorKh")
+                return
 
         # Отримуємо інфо про канал (для логів та підпису)
         channel_title = getattr(chat, "title", "Невідомий канал")
