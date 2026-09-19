@@ -49,6 +49,7 @@ async def main():
     )
     from dawn_bot import DawnBot
     from rent_bot import RentBot
+    from job_bot import JobBot
     
     from telethon import TelegramClient
     from telethon.sessions import StringSession
@@ -95,6 +96,7 @@ async def main():
     discount_monitor = DiscountMonitor(client)
     dawn_bot = DawnBot()
     rent_bot = RentBot(client)
+    job_bot = JobBot(client)
 
     logger.info("🚀 Запускаємо всі боти...")
 
@@ -103,6 +105,7 @@ async def main():
     await utility_monitor.start()
     await dawn_bot.start()
     await rent_bot.start()
+    await job_bot.start()
 
     try:
         await asyncio.gather(
