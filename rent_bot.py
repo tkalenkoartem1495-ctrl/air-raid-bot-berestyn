@@ -37,8 +37,8 @@ class RentBot:
         now = datetime.now(self.tz)
         
         # Від 20:00 попереднього дня до 19:50 поточного
-        end_time = now.replace(hour=19, minute=50, second=0, microsecond=0)
-        start_time = (end_time - timedelta(days=1)).replace(hour=20, minute=0)
+        end_time = now.replace(hour=16, minute=50, second=0, microsecond=0)
+        start_time = (end_time - timedelta(days=1)).replace(hour=17, minute=0)
         
         logger.info(f"Збираємо оренду від {start_time} до {end_time}")
         
@@ -167,21 +167,21 @@ class RentBot:
             date_key = now.strftime("%m-%d")
             
             # Прокидаємося о 19:50 для підготовки
-            if now.hour == 19 and now.minute == 50 and self.last_posted_date != date_key:
+            if now.hour == 16 and now.minute == 50 and self.last_posted_date != date_key:
                 if self.bot and self.model:
                     try:
-                        logger.info("19:50 - Починаємо збір та обробку оренди (маємо 10 хв в запасі)...")
+                        logger.info("16:50 - Починаємо збір та обробку оренди (маємо 10 хв в запасі)...")
                         report = await self._fetch_and_process()
                         
-                        logger.info("Звіт готовий. Очікуємо 20:00 для публікації...")
+                        logger.info("Звіт готовий. Очікуємо 17:00 для публікації...")
                         # Чекаємо рівно до 20:00
                         while True:
                             wait_now = datetime.now(self.tz)
-                            if wait_now.hour == 20 and wait_now.minute >= 0:
+                            if wait_now.hour == 17 and wait_now.minute >= 0:
                                 break
                             await asyncio.sleep(10)
                             
-                        logger.info("20:00 - Публікуємо звіт про оренду!")
+                        logger.info("17:00 - Публікуємо звіт про оренду!")
                         await self.bot.send_message(
                             chat_id=TELEGRAM_CHAT_ID,
                             text=report,
