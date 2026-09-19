@@ -67,7 +67,8 @@ class RentBot:
                                 
                     messages_data.append({
                         "user": username,
-                        "text": msg.raw_text[:300].replace('\n', ' ')
+                        "text": msg.raw_text[:300].replace('\n', ' '),
+                        "link": f"https://t.me/{chat}/{msg.id}"
                     })
             except Exception as e:
                 logger.error(f"Помилка чату {chat} (Оренда): {e}")
@@ -84,22 +85,23 @@ class RentBot:
         prompt_template = """
 Ти помічник, який фільтрує повідомлення з місцевого чату про оренду житла.
 Знайди повідомлення, де:
-1) Здають житло в оренду (квартири, будинки, кімнати)
+1) Здають житло в оренду ВИКЛЮЧНО ДЛЯ ПРОЖИВАННЯ (квартири, будинки, кімнати)
 2) Шукають житло для оренди (хочуть зняти)
 
-Ігноруй продаж, послуги, таксі та інший спам.
+СУВОРО ІГНОРУЙ: комерційну нерухомість (магазини, склади, салони), гаражі, продаж, послуги, таксі та інший спам.
 Ось список повідомлень (JSON):
 {json_data}
 
 Поверни ТІЛЬКИ валідний JSON у форматі:
 {
   "offering": [
-     {"user": "username", "summary": "короткий опис, наприклад: Здам 1к квартиру"}
+     {"user": "username", "summary": "короткий опис", "link": "https://t.me/..."}
   ],
   "seeking": [
-     {"user": "username", "summary": "короткий опис, наприклад: Зніму будинок"}
+     {"user": "username", "summary": "короткий опис", "link": "https://t.me/..."}
   ]
 }
+Дуже важливо: повертай ТОЧНО ТЕ САМЕ посилання (link), яке було передано тобі у вхідному JSON для відповідного повідомлення!
 Якщо нічого не знайдено, поверни порожні масиви. Без форматування markdown!
 """
         
@@ -135,18 +137,24 @@ class RentBot:
         offering = dedup(offering)
         seeking = dedup(seeking)
         
-        output = "За останню добу:\n\n"
-        output += "Здавали в оренду\n"
+        output = "<b>За останню добу:</b>\n\n"
+        output += "<b>🏠 Здавали в оренду</b>\n"
         if offering:
             for idx, item in enumerate(offering, 1):
-                output += f"{idx}. [{item.get('user', 'Невідомо')}] | [{item.get('summary', '')}]\n"
+                user = item.get('user', 'Невідомо')
+                summary = item.get('summary', '')
+                link = item.get('link', '')
+                output += f"{idx}. {user} | <a href='{link}'>{summary}</a>\n"
         else:
             output += "- Немає оголошень\n"
             
-        output += "\nШукали житло\n"
+        output += "\n<b>🔎 Шукали житло</b>\n"
         if seeking:
             for idx, item in enumerate(seeking, 1):
-                output += f"{idx}. [{item.get('user', 'Невідомо')}] | [{item.get('summary', '')}]\n"
+                user = item.get('user', 'Невідомо')
+                summary = item.get('summary', '')
+                link = item.get('link', '')
+                output += f"{idx}. {user} | <a href='{link}'>{summary}</a>\n"
         else:
             output += "- Немає оголошень\n"
             
