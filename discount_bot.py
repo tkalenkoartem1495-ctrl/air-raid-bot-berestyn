@@ -10,7 +10,7 @@ from telegram.constants import ParseMode
 
 logger = logging.getLogger(__name__)
 
-DISCOUNT_BOT_TOKEN = os.environ.get("DISCOUNT_BOT_TOKEN", "8441604612:AAFl9F0bkxWygvOHOCZ0nGjrTfeVPGXYZH8")
+DISCOUNT_BOT_TOKEN = os.environ.get("DISCOUNT_BOT_TOKEN", "8441604612:AAHC1brGLaXAKxd8cPozBCCYTMR0njV8few")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "-1001110859952")
 ATB_CHANNEL_ID = -1002353861460
 
