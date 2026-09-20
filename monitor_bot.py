@@ -58,12 +58,29 @@ class ChannelMonitor:
         return any(kw in text_lower for kw in FILTER_KEYWORDS)
 
     async def _translate(self, text: str) -> str:
-        """Перекладає текст на українську через Google Translate."""
+        """Перекладає текст на українську через Gemini."""
         try:
-            translated = await asyncio.to_thread(self.translator.translate, text)
-            return translated or text
+            import google.generativeai as genai
+            GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+            if not GEMINI_API_KEY:
+                return text
+                
+            genai.configure(api_key=GEMINI_API_KEY)
+            model = genai.GenerativeModel("gemini-flash-lite-latest")
+            
+            prompt = (
+                "Переклади наступний текст на чисту українську мову. "
+                "Збережи всі емодзі та оригінальне форматування. "
+                "Якщо текст вже українською, просто поверни його без змін. "
+                "Відповідай ТІЛЬКИ перекладеним текстом:\n\n"
+                f"{text}"
+            )
+            
+            # Gemini block
+            response = await asyncio.to_thread(model.generate_content, prompt)
+            return response.text.strip() if response and response.text else text
         except Exception as e:
-            logger.warning(f"Помилка перекладу: {e}")
+            logger.warning(f"Помилка перекладу Gemini: {e}")
             return text
 
     async def _on_new_message(self, event):
