@@ -30,6 +30,7 @@ POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "10"))
 TARGET_DISTRICT_NAMES = [
     "Берестинський район",
     "Красноградський район",
+    "Харківська область",
 ]
 
 ALERTS_API_BASE = "https://api.alerts.in.ua/v1"
