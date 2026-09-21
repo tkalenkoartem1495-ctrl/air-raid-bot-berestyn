@@ -51,6 +51,7 @@ class ChannelMonitor:
         self.client = client
         self.bot = Bot(token=MONITOR_BOT_TOKEN)
         self.translator = GoogleTranslator(source="auto", target="uk")
+        self.recent_messages = []  # Для дедуплікації (clean_text, timestamp)
 
         # Реєструємо обробники для нових та відредагованих повідомлень
         self.client.on(events.NewMessage)(self._on_new_message)
@@ -119,6 +120,24 @@ class ChannelMonitor:
 
         if not self._matches_filter(text):
             return
+            
+        # Дедуплікація (запобігає спаму однаковими повідомленнями)
+        import time
+        import re
+        clean_text_for_dedup = re.sub(r'[^\w\s]', '', text.lower())
+        now = time.time()
+        
+        # Очищаємо старі повідомлення (старіші за 2 години = 7200 сек)
+        self.recent_messages = [(msg, ts) for msg, ts in self.recent_messages if now - ts < 7200]
+        
+        # Перевіряємо чи було таке вже
+        for past_msg, _ in self.recent_messages:
+            if clean_text_for_dedup == past_msg:
+                logger.info("Повідомлення дублює недавнє. Пропускаємо (анти-спам).")
+                return
+        
+        # Додаємо в кеш
+        self.recent_messages.append((clean_text_for_dedup, now))
             
         # Ігноруємо повідомлення про початок/відбій тривоги тільки для NochnojDozorKh
         if chat_id == -1001667056986 or (channel_username and channel_username.lower() == "nochnojdozorkh"):
