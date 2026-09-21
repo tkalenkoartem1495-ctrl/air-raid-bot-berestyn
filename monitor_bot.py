@@ -38,6 +38,11 @@ MONITORED_CHANNEL_IDS = [
 # Ключові слова для фільтрації (регістронезалежно)
 FILTER_KEYWORDS = ["красноград", "берестин"]
 
+EXACT_PHRASES = [
+    "в харьковской области шахеды не фиксируются могут лететь незамеченными",
+    "на харківщині шахеди не фіксуються можуть летіти непоміченими"
+]
+
 
 class ChannelMonitor:
     """Моніторинг Telegram-каналів через userbot (Telethon)."""
@@ -54,7 +59,17 @@ class ChannelMonitor:
     def _matches_filter(self, text: str) -> bool:
         """Перевіряє, чи містить текст ключові слова."""
         text_lower = text.lower()
-        return any(kw in text_lower for kw in FILTER_KEYWORDS)
+        if any(kw in text_lower for kw in FILTER_KEYWORDS):
+            return True
+            
+        import re
+        clean_text_for_phrases = re.sub(r'[^\w\s]', '', text_lower)
+        for phrase in EXACT_PHRASES:
+            phrase_clean = re.sub(r'[^\w\s]', '', phrase.lower())
+            if phrase_clean in clean_text_for_phrases:
+                return True
+                
+        return False
 
     async def _translate(self, text: str) -> str:
         """Перекладає текст на українську через Gemini."""
