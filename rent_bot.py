@@ -177,10 +177,11 @@ class RentBot:
             now = datetime.now(self.tz)
             date_key = now.strftime("%m-%d")
             
-            # Цільовий час початку: 16:50
-            target_time = now.replace(hour=16, minute=50, second=0, microsecond=0)
+            # Цільовий час початку: 16:50, кінець вікна 17:05
+            target_start = now.replace(hour=16, minute=50, second=0, microsecond=0)
+            target_end = now.replace(hour=17, minute=5, second=0, microsecond=0)
             
-            if now >= target_time and self.last_posted_date != date_key:
+            if target_start <= now < target_end and self.last_posted_date != date_key:
                 if self.bot and self.model:
                     try:
                         logger.info("Починаємо збір та обробку оренди...")
