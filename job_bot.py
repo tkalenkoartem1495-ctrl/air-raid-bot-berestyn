@@ -206,17 +206,17 @@ class JobBot:
             now = datetime.now(self.tz)
             date_key = now.strftime("%m-%d")
             
-            if now.hour == 17 and now.minute == 20 and self.last_posted_date != date_key:
+            target_time = now.replace(hour=17, minute=20, second=0, microsecond=0)
+            
+            if now >= target_time and self.last_posted_date != date_key:
                 if self.bot and self.model:
                     try:
-                        logger.info("17:20 - Починаємо збір та обробку вакансій (маємо 10 хв в запасі)...")
+                        logger.info("Починаємо збір та обробку вакансій...")
                         report = await self._fetch_and_process()
                         
                         logger.info("Звіт про роботу готовий. Очікуємо 17:30 для публікації...")
-                        while True:
-                            wait_now = datetime.now(self.tz)
-                            if wait_now.hour == 17 and wait_now.minute >= 30:
-                                break
+                        publish_time = now.replace(hour=17, minute=30, second=0, microsecond=0)
+                        while datetime.now(self.tz) < publish_time:
                             await asyncio.sleep(10)
                             
                         logger.info("17:30 - Публікуємо звіт про роботу!")

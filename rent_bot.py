@@ -160,38 +160,43 @@ class RentBot:
             
         return output
 
+    async def _post_to_channel(self, text: str):
+        if self.bot:
+            await self.bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=text,
+                disable_web_page_preview=True
+            )
+            logger.info("✅ Пост про оренду успішно опубліковано!")
+
     async def _scheduler_loop(self):
-        """Фонова задача: старт збору о 19:50, публікація рівно о 20:00."""
+        """Фонова задача: старт збору о 16:50, публікація о 17:00."""
         while True:
             now = datetime.now(self.tz)
             date_key = now.strftime("%m-%d")
             
-            # Прокидаємося о 19:50 для підготовки
-            if now.hour == 16 and now.minute == 50 and self.last_posted_date != date_key:
+            # Цільовий час початку: 16:50
+            target_time = now.replace(hour=16, minute=50, second=0, microsecond=0)
+            
+            if now >= target_time and self.last_posted_date != date_key:
                 if self.bot and self.model:
                     try:
-                        logger.info("16:50 - Починаємо збір та обробку оренди (маємо 10 хв в запасі)...")
+                        logger.info("Починаємо збір та обробку оренди...")
                         report = await self._fetch_and_process()
                         
                         logger.info("Звіт готовий. Очікуємо 17:00 для публікації...")
-                        # Чекаємо рівно до 20:00
-                        while True:
-                            wait_now = datetime.now(self.tz)
-                            if wait_now.hour == 17 and wait_now.minute >= 0:
-                                break
+                        publish_time = now.replace(hour=17, minute=0, second=0, microsecond=0)
+                        while datetime.now(self.tz) < publish_time:
                             await asyncio.sleep(10)
                             
-                        logger.info("17:00 - Публікуємо звіт про оренду!")
-                        await self.bot.send_message(
-                            chat_id=TELEGRAM_CHAT_ID,
-                            text=report,
-                            disable_web_page_preview=True
-                        )
-                        logger.info("✅ Пост про оренду успішно опубліковано!")
+                        await self._post_to_channel(report)
+                        
                         self.last_posted_date = date_key
+                        with open("history_rent.json", "w") as f:
+                            json.dump({"last_posted_date": date_key}, f)
                     except Exception as e:
-                        logger.error(f"Помилка підготовки/публікації оренди: {e}")
-            
+                        logger.error(f"Помилка у розкладі RentBot: {e}")
+                        
             await asyncio.sleep(30)
 
     async def start(self):
