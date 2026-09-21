@@ -202,10 +202,12 @@ class DawnBot:
             now = datetime.now(self.tz)
             date_key = now.strftime("%m-%d")
             
-            # Цільовий час для посту: 06:30. Якщо зараз 06:30 або пізніше, і ми ще не постили сьогодні - постимо!
-            target_time = now.replace(hour=6, minute=30, second=0, microsecond=0)
+            # Цільовий час для посту: 06:30. Даємо вікно до 06:45.
+            # Якщо час пізніший - пропускаємо сьогоднішній ранок.
+            target_start = now.replace(hour=6, minute=30, second=0, microsecond=0)
+            target_end = now.replace(hour=6, minute=45, second=0, microsecond=0)
             
-            if now >= target_time and self.last_posted_date != date_key:
+            if target_start <= now < target_end and self.last_posted_date != date_key:
                 if self.bot and self.model:
                     await self._post_morning_message()
             
