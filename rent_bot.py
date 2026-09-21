@@ -165,6 +165,7 @@ class RentBot:
             await self.bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
                 text=text,
+                parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True
             )
             logger.info("✅ Пост про оренду успішно опубліковано!")
