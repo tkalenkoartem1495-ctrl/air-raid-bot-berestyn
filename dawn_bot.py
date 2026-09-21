@@ -17,7 +17,8 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 class DawnBot:
-    def __init__(self):
+    def __init__(self, client=None):
+        self.client = client
         self.bot = Bot(token=DAWN_BOT_TOKEN) if DAWN_BOT_TOKEN else None
         
         if GEMINI_API_KEY:

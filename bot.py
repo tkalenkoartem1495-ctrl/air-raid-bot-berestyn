@@ -1,3 +1,4 @@
+from telethon import TelegramClient
 #!/usr/bin/env python3
 """
 Telegram бот для повідомлення про повітряну тривогу
@@ -173,7 +174,8 @@ def build_alert_off_message(alert: dict) -> str:
 class AlertMonitor:
     """Моніторинг тривог через API alerts.in.ua."""
 
-    def __init__(self):
+    def __init__(self, client=None):
+        self.client = client
         self.bot = Bot(token=TELEGRAM_BOT_TOKEN)
         self.active_alerts: dict[int, dict] = {}  # id -> alert data
         self._session: aiohttp.ClientSession | None = None
@@ -269,7 +271,31 @@ class AlertMonitor:
                     f"(тип: {alert.get('alert_type')})"
                 )
                 msg = build_alert_on_message(alert)
-                await self.send_telegram(msg)
+                
+                # STATELESS DEDUPLICATION
+                is_duplicate = False
+                if self.client:
+                    try:
+                        import time
+                        now_ts = time.time()
+                        async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=10):
+                            if past_msg.date and (now_ts - past_msg.date.timestamp()) < 7200:
+                                if past_msg.text:
+                                    if "Повітряна тривога" in past_msg.text and "Увага" in past_msg.text:
+                                        # Last thing in channel was a siren! We shouldn't post another one.
+                                        is_duplicate = True
+                                        break
+                                    if "Відбій" in past_msg.text:
+                                        # Last thing was all clear, so we CAN post a new siren.
+                                        break
+                    except Exception as e:
+                        logger.error(f"Stateless dedup error (bot): {e}")
+                
+                if not is_duplicate:
+                    await self.send_telegram(msg)
+                else:
+                    logger.info("Повітряна тривога вже опублікована недавно в каналі. Пропускаємо.")
+                    
                 self.active_alerts[alert["id"]] = alert
 
         # Оновлені тривоги (оновлення загроз тощо)

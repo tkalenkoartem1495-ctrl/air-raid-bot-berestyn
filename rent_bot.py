@@ -192,7 +192,28 @@ class RentBot:
                         while datetime.now(self.tz) < publish_time:
                             await asyncio.sleep(10)
                             
-                        await self._post_to_channel(report)
+                        # STATELESS DEDUPLICATION
+                        is_duplicate = False
+                        if self.client:
+                            try:
+                                import time
+                                now_ts = time.time()
+                                async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=20):
+                                    # If message is from today and contains 'Здавали в оренду'
+                                    if past_msg.date and (now_ts - past_msg.date.timestamp()) < 86400:
+                                        if past_msg.text and "Здавали в оренду" in past_msg.text:
+                                            # Check if it was sent today (local time)
+                                            msg_date_local = past_msg.date.astimezone(self.tz).strftime("%m-%d")
+                                            if msg_date_local == date_key:
+                                                is_duplicate = True
+                                                break
+                            except Exception as e:
+                                logger.error(f"Stateless dedup error (rent): {e}")
+                                
+                        if not is_duplicate:
+                            await self._post_to_channel(report)
+                        else:
+                            logger.info("Звіт про оренду вже був опублікований сьогодні. Пропускаємо.")
                         
                         self.last_posted_date = date_key
                         with open("history_rent.json", "w") as f:

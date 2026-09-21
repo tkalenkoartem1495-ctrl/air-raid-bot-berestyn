@@ -161,22 +161,60 @@ class UtilityMonitor:
                     if "[LIGHT]" in line and self.light_bot and light_active:
                         clean_text = line.replace("[LIGHT]", "").strip()
                         clean_text = self._replace_city_name(clean_text)
-                        await self.light_bot.send_message(
-                            chat_id=TELEGRAM_CHAT_ID,
-                            text=clean_text
-                        )
-                        logger.info(f"💡 Відправлено статус світла: {clean_text}")
-                        self.light_cooldown_until = time.time() + 1800
+                        
+                        # STATELESS DEDUPLICATION
+                        is_duplicate = False
+                        try:
+                            now_ts = time.time()
+                            clean_test = re.sub(r'[^\w\s]', '', clean_text.lower())
+                            async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=15):
+                                if past_msg.date and (now_ts - past_msg.date.timestamp()) < 7200:
+                                    if past_msg.text:
+                                        past_clean = re.sub(r'[^\w\s]', '', past_msg.text.lower())
+                                        if clean_test in past_clean or past_clean in clean_test:
+                                            is_duplicate = True
+                                            break
+                        except Exception as e:
+                            logger.error(f"Stateless dedup error (light): {e}")
+                            
+                        if not is_duplicate:
+                            await self.light_bot.send_message(
+                                chat_id=TELEGRAM_CHAT_ID,
+                                text=clean_text
+                            )
+                            logger.info(f"💡 Відправлено статус світла: {clean_text}")
+                            self.light_cooldown_until = time.time() + 1800
+                        else:
+                            logger.info("Повідомлення про світло вже було опубліковано недавно. Пропускаємо.")
                         
                     elif "[WATER]" in line and self.water_bot and water_active:
                         clean_text = line.replace("[WATER]", "").strip()
                         clean_text = self._replace_city_name(clean_text)
-                        await self.water_bot.send_message(
-                            chat_id=TELEGRAM_CHAT_ID,
-                            text=clean_text
-                        )
-                        logger.info(f"💧 Відправлено статус води: {clean_text}")
-                        self.water_cooldown_until = time.time() + 1800
+                        
+                        # STATELESS DEDUPLICATION
+                        is_duplicate = False
+                        try:
+                            now_ts = time.time()
+                            clean_test = re.sub(r'[^\w\s]', '', clean_text.lower())
+                            async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=15):
+                                if past_msg.date and (now_ts - past_msg.date.timestamp()) < 7200:
+                                    if past_msg.text:
+                                        past_clean = re.sub(r'[^\w\s]', '', past_msg.text.lower())
+                                        if clean_test in past_clean or past_clean in clean_test:
+                                            is_duplicate = True
+                                            break
+                        except Exception as e:
+                            logger.error(f"Stateless dedup error (water): {e}")
+                            
+                        if not is_duplicate:
+                            await self.water_bot.send_message(
+                                chat_id=TELEGRAM_CHAT_ID,
+                                text=clean_text
+                            )
+                            logger.info(f"💧 Відправлено статус води: {clean_text}")
+                            self.water_cooldown_until = time.time() + 1800
+                        else:
+                            logger.info("Повідомлення про воду вже було опубліковано недавно. Пропускаємо.")
                         
             except Exception as e:
                 logger.error(f"Помилка обробки Gemini або відправки: {e}")
