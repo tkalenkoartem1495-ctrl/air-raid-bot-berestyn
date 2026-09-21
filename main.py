@@ -88,21 +88,6 @@ async def main():
     await client.start()
     logger.info("✅ Спільний Telethon клієнт підключено")
 
-    # --- ТИМЧАСОВИЙ ФІКС ДЛЯ ПЕРЕПУБЛІКАЦІЇ ЗЛАМАНОГО ПОСТУ ОРЕНДИ ---
-    try:
-        from telegram import Bot
-        from telegram.constants import ParseMode
-        temp_bot = Bot(token=os.environ.get("RENT_BOT_TOKEN"))
-        msgs = await client.get_messages(int(TELEGRAM_CHAT_ID), limit=10)
-        for m in msgs:
-            if m.text and "<b>За останню добу:</b>" in m.text:
-                await temp_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=m.text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-                await client.delete_messages(int(TELEGRAM_CHAT_ID), m.id)
-                logger.info("Успішно перевидано зламаний пост оренди!")
-                break
-    except Exception as e:
-        logger.error(f"Не вдалося перевидати пост: {e}")
-    # ---------------------------------------------------------------
 
 
     # Ініціалізуємо всі боти
