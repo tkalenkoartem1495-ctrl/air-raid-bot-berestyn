@@ -47,10 +47,9 @@ class ChannelMonitor:
         self.bot = Bot(token=MONITOR_BOT_TOKEN)
         self.translator = GoogleTranslator(source="auto", target="uk")
 
-        # Реєструємо обробник нових повідомлень (без жорсткого фільтра по chats, щоб уникнути проблем з кешем)
-        self.client.on(events.NewMessage)(
-            self._on_new_message
-        )
+        # Реєструємо обробники для нових та відредагованих повідомлень
+        self.client.on(events.NewMessage)(self._on_new_message)
+        self.client.on(events.MessageEdited)(self._on_new_message)
 
     def _matches_filter(self, text: str) -> bool:
         """Перевіряє, чи містить текст ключові слова."""
