@@ -108,6 +108,7 @@ async def main():
     await dawn_bot.start()
     await rent_bot.start()
     await job_bot.start()
+    await discount_monitor.start()
 
     try:
         await asyncio.gather(

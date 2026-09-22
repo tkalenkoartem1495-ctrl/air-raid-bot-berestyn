@@ -44,6 +44,87 @@ class DiscountMonitor:
         else:
             return "#АТБ"
 
+
+    async def start(self):
+        """Запускається при старті — перевіряє пропущені знижки за останні 48 год."""
+        logger.info("🛒 Бот знижок запущено! Перевіряємо пропущені повідомлення (48 год)...")
+        
+        from datetime import datetime, timedelta, timezone
+        import io
+        from telegram import InputMediaPhoto
+        
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
+        processed_groups = set()
+        
+        try:
+            # Перевіряємо, чи є вже пост про знижки в нашому каналі за останні 48 год
+            published_captions = set()
+            async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=30):
+                if past_msg.date and past_msg.date < cutoff:
+                    break
+                if past_msg.text and '#АТБ' in past_msg.text:
+                    published_captions.add(past_msg.text.strip())
+            
+            logger.info(f"В каналі вже є {len(published_captions)} постів #АТБ за 48 год")
+            
+            async for msg in self.client.iter_messages(ATB_CHANNEL_ID, limit=100):
+                if msg.date and msg.date < cutoff:
+                    break
+                
+                if not msg.grouped_id and not msg.media:
+                    continue
+                    
+                # Одиночне повідомлення з текстом
+                if not msg.grouped_id:
+                    if msg.raw_text and '#АТБ' in msg.raw_text:
+                        clean = self._process_text(msg.raw_text)
+                        if clean and clean not in published_captions:
+                            buffer = io.BytesIO()
+                            await self.client.download_media(msg.media, file=buffer)
+                            buffer.seek(0)
+                            await self.bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=buffer, caption=clean)
+                            published_captions.add(clean)
+                            logger.info(f"✅ Наздогнали одиночне повідомлення {msg.id}")
+                    continue
+                
+                # Альбом
+                if msg.grouped_id in processed_groups:
+                    continue
+                processed_groups.add(msg.grouped_id)
+                
+                # Збираємо весь альбом
+                album = [m async for m in self.client.iter_messages(ATB_CHANNEL_ID, limit=30)
+                         if m.grouped_id == msg.grouped_id]
+                
+                target_text = next((m.raw_text for m in album if m.raw_text and '#АТБ' in m.raw_text), "")
+                if not target_text:
+                    continue
+                    
+                clean = self._process_text(target_text)
+                if not clean or clean in published_captions:
+                    continue
+                    
+                # Публікуємо альбом
+                album.sort(key=lambda x: x.id)
+                media_group = []
+                for i, m in enumerate(album):
+                    if m.media:
+                        buf = io.BytesIO()
+                        await self.client.download_media(m.media, file=buf)
+                        buf.seek(0)
+                        if i == 0:
+                            media_group.append(InputMediaPhoto(media=buf, caption=clean, parse_mode="HTML"))
+                        else:
+                            media_group.append(InputMediaPhoto(media=buf))
+                
+                if media_group:
+                    await self.bot.send_media_group(chat_id=TELEGRAM_CHAT_ID, media=media_group)
+                    published_captions.add(clean)
+                    logger.info(f"✅ Наздогнали альбом grouped_id={msg.grouped_id}")
+                    
+        except Exception as e:
+            logger.error(f"Помилка catchup в discount_bot: {e}")
+
     async def _on_new_message(self, event):
         """Обробник нових повідомлень з каналу знижок."""
         from telegram import InputMediaPhoto
