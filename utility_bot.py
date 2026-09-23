@@ -25,6 +25,7 @@ WATER_BOT_TOKEN = os.environ.get("WATER_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 MONITORED_CHATS = ["krasnogradbezp", "krasnograd3serzem"]
+POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "120"))
 
 PROMPT = """Ти моніториш повідомлення мешканців щодо світла та води у місцевих чатах міста Берестин.
 Прочитай цей батч повідомлень. Твоє завдання — публікувати ТІЛЬКИ інформацію про фактичні відключення або ЗАПИТАННЯ щодо наявності послуг.
