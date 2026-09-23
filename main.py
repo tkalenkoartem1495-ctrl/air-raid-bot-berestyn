@@ -18,6 +18,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+
+async def memory_clear_loop():
+    import gc
+    while True:
+        await asyncio.sleep(600)  # Every 10 minutes
+        gc.collect()
+
 async def main():
     from bot import (
         AlertMonitor,
@@ -101,6 +108,8 @@ async def main():
     job_bot = JobBot(client)
 
     logger.info("🚀 Запускаємо всі боти...")
+
+    asyncio.create_task(memory_clear_loop())
 
     # Стартуємо налаштування/фонові задачі
     await channel_monitor.start()
