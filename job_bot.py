@@ -204,53 +204,56 @@ class JobBot:
 
     async def _scheduler_loop(self):
         while True:
-            now = datetime.now(self.tz)
-            date_key = now.strftime("%m-%d")
-            
-            target_start = now.replace(hour=17, minute=20, second=0, microsecond=0)
-            target_end = now.replace(hour=17, minute=35, second=0, microsecond=0)
-            
-            if target_start <= now < target_end and self.last_posted_date != date_key:
-                if self.bot and self.model:
-                    try:
-                        logger.info("Починаємо збір та обробку вакансій...")
-                        report = await self._fetch_and_process()
-                        
-                        logger.info("Звіт про роботу готовий. Очікуємо 17:30 для публікації...")
-                        publish_time = now.replace(hour=17, minute=30, second=0, microsecond=0)
-                        while datetime.now(self.tz) < publish_time:
-                            await asyncio.sleep(10)
+            try:
+                now = datetime.now(self.tz)
+                date_key = now.strftime("%m-%d")
+                
+                target_start = now.replace(hour=17, minute=20, second=0, microsecond=0)
+                target_end = now.replace(hour=17, minute=35, second=0, microsecond=0)
+                
+                if target_start <= now < target_end and self.last_posted_date != date_key:
+                    if self.bot and self.model:
+                        try:
+                            logger.info("Починаємо збір та обробку вакансій...")
+                            report = await self._fetch_and_process()
                             
-                        logger.info("17:30 - Публікуємо звіт про роботу!")
-                        # STATELESS DEDUPLICATION
-                        is_duplicate = False
-                        if self.client:
-                            try:
-                                import time
-                                now_ts = time.time()
-                                async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=20):
-                                    if past_msg.date and (now_ts - past_msg.date.timestamp()) < 86400:
-                                        if past_msg.text and "💼 Вакансії" in past_msg.text and "За останню добу" in past_msg.text:
-                                            msg_date_local = past_msg.date.astimezone(self.tz).strftime("%m-%d")
-                                            if msg_date_local == date_key:
-                                                is_duplicate = True
-                                                break
-                            except Exception as e:
-                                logger.error(f"Stateless dedup error (job): {e}")
+                            logger.info("Звіт про роботу готовий. Очікуємо 17:30 для публікації...")
+                            publish_time = now.replace(hour=17, minute=30, second=0, microsecond=0)
+                            while datetime.now(self.tz) < publish_time:
+                                await asyncio.sleep(10)
                                 
-                        if not is_duplicate:
-                            await self.bot.send_message(
-                                chat_id=TELEGRAM_CHAT_ID,
-                                text=report,
-                                parse_mode=ParseMode.HTML,
-                                disable_web_page_preview=True
-                            )
-                        else:
-                            logger.info("Звіт про роботу вже був опублікований сьогодні. Пропускаємо.")
-                        logger.info("✅ Пост про роботу успішно опубліковано!")
-                        self.last_posted_date = date_key
-                    except Exception as e:
-                        logger.error(f"Помилка підготовки/публікації вакансій: {e}")
+                            logger.info("17:30 - Публікуємо звіт про роботу!")
+                            # STATELESS DEDUPLICATION
+                            is_duplicate = False
+                            if self.client:
+                                try:
+                                    import time
+                                    now_ts = time.time()
+                                    async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=20):
+                                        if past_msg.date and (now_ts - past_msg.date.timestamp()) < 86400:
+                                            if past_msg.text and "💼 Вакансії" in past_msg.text and "За останню добу" in past_msg.text:
+                                                msg_date_local = past_msg.date.astimezone(self.tz).strftime("%m-%d")
+                                                if msg_date_local == date_key:
+                                                    is_duplicate = True
+                                                    break
+                                except Exception as e:
+                                    logger.error(f"Stateless dedup error (job): {e}")
+                                    
+                            if not is_duplicate:
+                                await self.bot.send_message(
+                                    chat_id=TELEGRAM_CHAT_ID,
+                                    text=report,
+                                    parse_mode=ParseMode.HTML,
+                                    disable_web_page_preview=True
+                                )
+                            else:
+                                logger.info("Звіт про роботу вже був опублікований сьогодні. Пропускаємо.")
+                            logger.info("✅ Пост про роботу успішно опубліковано!")
+                            self.last_posted_date = date_key
+                        except Exception as e:
+                            logger.error(f"Помилка підготовки/публікації вакансій: {e}")
+            except Exception as e:
+                logger.error(f"Помилка в _scheduler_loop (JobBot): {e}")
             
             await asyncio.sleep(30)
 

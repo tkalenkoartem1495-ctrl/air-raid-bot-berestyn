@@ -163,63 +163,69 @@ class RentBot:
 
     async def _post_to_channel(self, text: str):
         if self.bot:
-            await self.bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True
-            )
-            logger.info("✅ Пост про оренду успішно опубліковано!")
+            try:
+                await self.bot.send_message(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True
+                )
+                logger.info("✅ Пост про оренду успішно опубліковано!")
+            except Exception as e:
+                logger.error(f"Помилка відправки в Telegram (RentBot): {e}")
 
     async def _scheduler_loop(self):
         """Фонова задача: старт збору о 16:50, публікація о 17:00."""
         while True:
-            now = datetime.now(self.tz)
-            date_key = now.strftime("%m-%d")
-            
-            # Цільовий час початку: 16:50, кінець вікна 17:05
-            target_start = now.replace(hour=16, minute=50, second=0, microsecond=0)
-            target_end = now.replace(hour=17, minute=5, second=0, microsecond=0)
-            
-            if target_start <= now < target_end and self.last_posted_date != date_key:
-                if self.bot and self.model:
-                    try:
-                        logger.info("Починаємо збір та обробку оренди...")
-                        report = await self._fetch_and_process()
-                        
-                        logger.info("Звіт готовий. Очікуємо 17:00 для публікації...")
-                        publish_time = now.replace(hour=17, minute=0, second=0, microsecond=0)
-                        while datetime.now(self.tz) < publish_time:
-                            await asyncio.sleep(10)
+            try:
+                now = datetime.now(self.tz)
+                date_key = now.strftime("%m-%d")
+                
+                # Цільовий час початку: 16:50, кінець вікна 17:05
+                target_start = now.replace(hour=16, minute=50, second=0, microsecond=0)
+                target_end = now.replace(hour=17, minute=5, second=0, microsecond=0)
+                
+                if target_start <= now < target_end and self.last_posted_date != date_key:
+                    if self.bot and self.model:
+                        try:
+                            logger.info("Починаємо збір та обробку оренди...")
+                            report = await self._fetch_and_process()
                             
-                        # STATELESS DEDUPLICATION
-                        is_duplicate = False
-                        if self.client:
-                            try:
-                                import time
-                                now_ts = time.time()
-                                async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=20):
-                                    # If message is from today and contains 'Здавали в оренду'
-                                    if past_msg.date and (now_ts - past_msg.date.timestamp()) < 86400:
-                                        if past_msg.text and "Здавали в оренду" in past_msg.text:
-                                            # Check if it was sent today (local time)
-                                            msg_date_local = past_msg.date.astimezone(self.tz).strftime("%m-%d")
-                                            if msg_date_local == date_key:
-                                                is_duplicate = True
-                                                break
-                            except Exception as e:
-                                logger.error(f"Stateless dedup error (rent): {e}")
+                            logger.info("Звіт готовий. Очікуємо 17:00 для публікації...")
+                            publish_time = now.replace(hour=17, minute=0, second=0, microsecond=0)
+                            while datetime.now(self.tz) < publish_time:
+                                await asyncio.sleep(10)
                                 
-                        if not is_duplicate:
-                            await self._post_to_channel(report)
-                        else:
-                            logger.info("Звіт про оренду вже був опублікований сьогодні. Пропускаємо.")
-                        
-                        self.last_posted_date = date_key
-                        with open("history_rent.json", "w") as f:
-                            json.dump({"last_posted_date": date_key}, f)
-                    except Exception as e:
-                        logger.error(f"Помилка у розкладі RentBot: {e}")
+                            # STATELESS DEDUPLICATION
+                            is_duplicate = False
+                            if self.client:
+                                try:
+                                    import time
+                                    now_ts = time.time()
+                                    async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=20):
+                                        # If message is from today and contains 'Здавали в оренду'
+                                        if past_msg.date and (now_ts - past_msg.date.timestamp()) < 86400:
+                                            if past_msg.text and "Здавали в оренду" in past_msg.text and "За останню добу" in past_msg.text:
+                                                # Check if it was sent today (local time)
+                                                msg_date_local = past_msg.date.astimezone(self.tz).strftime("%m-%d")
+                                                if msg_date_local == date_key:
+                                                    is_duplicate = True
+                                                    break
+                                except Exception as e:
+                                    logger.error(f"Stateless dedup error (rent): {e}")
+                                    
+                            if not is_duplicate:
+                                await self._post_to_channel(report)
+                            else:
+                                logger.info("Звіт про оренду вже був опублікований сьогодні. Пропускаємо.")
+                            
+                            self.last_posted_date = date_key
+                            with open("history_rent.json", "w") as f:
+                                json.dump({"last_posted_date": date_key}, f)
+                        except Exception as e:
+                            logger.error(f"Помилка у розкладі RentBot: {e}")
+            except Exception as e:
+                logger.error(f"Помилка в _scheduler_loop (RentBot): {e}")
                         
             await asyncio.sleep(30)
 
@@ -228,4 +234,31 @@ class RentBot:
         logger.info("=" * 50)
         logger.info("🏠 Бот 'Оренда житла' запущено!")
         logger.info("=" * 50)
+        
+        # Catch-up logic: check if we missed today's 17:00 post
+        try:
+            now = datetime.now(self.tz)
+            date_key = now.strftime("%m-%d")
+            if now.hour >= 17:
+                is_duplicate = False
+                if self.client:
+                    import time
+                    now_ts = time.time()
+                    async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=20):
+                        if past_msg.date and (now_ts - past_msg.date.timestamp()) < 86400:
+                            if past_msg.text and "Здавали в оренду" in past_msg.text and "За останню добу" in past_msg.text:
+                                msg_date_local = past_msg.date.astimezone(self.tz).strftime("%m-%d")
+                                if msg_date_local == date_key:
+                                    is_duplicate = True
+                                    break
+                
+                if not is_duplicate:
+                    logger.info("🏠 Пропущено пост про оренду! Публікуємо зараз...")
+                    report = await self._fetch_and_process()
+                    await self._post_to_channel(report)
+                    self.last_posted_date = date_key
+                    logger.info("✅ Пропущений пост про оренду успішно опубліковано!")
+        except Exception as e:
+            logger.error(f"Помилка при catch-up перевірці (Оренда): {e}")
+            
         asyncio.create_task(self._scheduler_loop())

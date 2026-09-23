@@ -21,8 +21,9 @@ class DawnBot:
         self.client = client
         self.bot = Bot(token=DAWN_BOT_TOKEN) if DAWN_BOT_TOKEN else None
         
-        if GEMINI_API_KEY:
-            genai.configure(api_key=GEMINI_API_KEY)
+        api_key = os.environ.get("GEMINI_API_KEY", GEMINI_API_KEY)
+        if api_key:
+            genai.configure(api_key=api_key)
             self.model = genai.GenerativeModel("gemini-flash-lite-latest")
         else:
             self.model = None
@@ -145,16 +146,18 @@ class DawnBot:
         logger.info("🌤 Генеруємо ранковий пост через Gemini...")
 
         generated_text = ""
-        try:
-            # Звернення до Gemini (якщо квота вичерпана, видасть помилку, але бот спробує знову завтра)
-            response = await asyncio.to_thread(
-                self.model.generate_content, 
-                prompt
-            )
-            generated_text = response.text.strip()
-        except Exception as e:
-            logger.error(f"Помилка Gemini: {e}")
+        if self.model:
+            try:
+                # Звернення до Gemini (якщо квота вичерпана, видасть помилку, але бот спробує знову завтра)
+                response = await asyncio.to_thread(
+                    self.model.generate_content, 
+                    prompt
+                )
+                generated_text = response.text.strip()
+            except Exception as e:
+                logger.error(f"Помилка Gemini: {e}")
 
+        if not generated_text:
             import random
             fallbacks = [
                 "🌅 Доброго ранку, Берестин! Нехай цей день принесе гарні новини та спокій. ☕️🇺🇦",
@@ -179,7 +182,6 @@ class DawnBot:
                 "☀️ Привіт, Берестин! Нехай ранкове сонце (або просто гарний настрій) освітить ваш шлях сьогодні. 🇺🇦"
             ]
             generated_text = random.choice(fallbacks)
-
             
         final_message = generated_text
         if history_fact:
@@ -200,17 +202,20 @@ class DawnBot:
     async def _scheduler_loop(self):
         """Фонова задача для перевірки часу та публікації посту."""
         while True:
-            now = datetime.now(self.tz)
-            date_key = now.strftime("%m-%d")
-            
-            # Цільовий час для посту: 06:30. Даємо вікно до 06:45.
-            # Якщо час пізніший - пропускаємо сьогоднішній ранок.
-            target_start = now.replace(hour=6, minute=30, second=0, microsecond=0)
-            target_end = now.replace(hour=6, minute=45, second=0, microsecond=0)
-            
-            if target_start <= now < target_end and self.last_posted_date != date_key:
-                if self.bot and self.model:
-                    await self._post_morning_message()
+            try:
+                now = datetime.now(self.tz)
+                date_key = now.strftime("%m-%d")
+                
+                # Цільовий час для посту: 06:30. Даємо вікно до 06:45.
+                # Якщо час пізніший - пропускаємо сьогоднішній ранок.
+                target_start = now.replace(hour=6, minute=30, second=0, microsecond=0)
+                target_end = now.replace(hour=6, minute=45, second=0, microsecond=0)
+                
+                if target_start <= now < target_end and self.last_posted_date != date_key:
+                    if self.bot:
+                        await self._post_morning_message()
+            except Exception as e:
+                logger.error(f"Помилка у розкладі DawnBot: {e}")
             
             # Чекаємо 30 секунд перед наступною перевіркою
             await asyncio.sleep(30)
