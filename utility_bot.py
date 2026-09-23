@@ -25,6 +25,7 @@ WATER_BOT_TOKEN = os.environ.get("WATER_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 MONITORED_CHATS = ["krasnogradbezp", "krasnograd3serzem"]
+MONITORED_CHAT_IDS = [-1003258624007, -1004456930190, 3258624007, 4456930190]
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "120"))
 
 PROMPT = """Ти моніториш повідомлення мешканців щодо світла та води у місцевих чатах міста Берестин.
@@ -75,6 +76,10 @@ class UtilityMonitor:
         self.light_accumulating_until = 0
         self.light_accumulated_locations = set()
 
+        # Реєструємо обробник нових повідомлень
+        self.client.on(events.NewMessage)(self._on_new_message)
+        self.client.on(events.MessageEdited)(self._on_new_message)
+
     def _format_status_message(self, clean_text: str) -> str:
         """Перетворює текст в список з булітами."""
         match = re.match(r"(🔴 Відключення світла:|🔵 Відключення води:|🟡 Питання щодо наявності світла:|🟡 Питання щодо наявності води:)\s*(.*)", clean_text)
@@ -91,11 +96,6 @@ class UtilityMonitor:
             return formatted.strip()
         return clean_text
 
-        # Реєструємо обробник нових повідомлень (перевірка каналів буде всередині)
-        self.client.on(events.NewMessage)(
-            self._on_new_message
-        )
-
     async def _on_new_message(self, event):
         """Обробник нових повідомлень у комунальних чатах."""
         text = event.raw_text
@@ -104,8 +104,15 @@ class UtilityMonitor:
             
         chat = await event.get_chat()
         chat_username = getattr(chat, "username", "")
+        chat_id = getattr(event, "chat_id", 0)
         
-        if chat_username not in MONITORED_CHATS:
+        is_monitored = False
+        if chat_username and chat_username.lower() in [c.lower() for c in MONITORED_CHATS]:
+            is_monitored = True
+        elif chat_id in MONITORED_CHAT_IDS:
+            is_monitored = True
+            
+        if not is_monitored:
             return
 
         chat_title = getattr(chat, "title", "Чат")
