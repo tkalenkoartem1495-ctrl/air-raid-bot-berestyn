@@ -381,6 +381,14 @@ class AlertMonitor:
 
 from aiohttp import web
 
+
+async def handle_mem(request):
+    import os
+    import psutil
+    process = psutil.Process(os.getpid())
+    mem_info = process.memory_info()
+    return web.Response(text=f"RSS Memory: {mem_info.rss / 1024 / 1024:.2f} MB")
+
 async def handle_ping(request):
     return web.Response(text="Бот працює! 🚨")
 
@@ -388,6 +396,7 @@ async def init_web_server():
     """Запускає міні-вебсервер, щоб хостинг (напр. Render) не присипляв бота."""
     app = web.Application()
     app.router.add_get('/', handle_ping)
+    app.router.add_get('/mem', handle_mem)
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", 10000))
