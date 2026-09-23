@@ -175,18 +175,19 @@ class UtilityMonitor:
                             new_ones = new_locations - self.light_published_locations
                             logger.info(f"💡 Cooldown bypass: нова адреса {new_ones}! Публікуємо.")
                         
-                        # STATELESS DEDUPLICATION
+                        # STATELESS DEDUPLICATION (по адресах, не по всьому тексту)
                         is_duplicate = False
                         try:
                             now_ts = time.time()
-                            clean_test = re.sub(r'[^\w\s]', '', clean_text.lower())
-                            async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=15):
-                                if past_msg.date and (now_ts - past_msg.date.timestamp()) < 7200:
-                                    if past_msg.text:
-                                        past_clean = re.sub(r'[^\w\s]', '', past_msg.text.lower())
-                                        if clean_test in past_clean or past_clean in clean_test:
+                            # Шукаємо найсвіжіший наш пост про світло у каналі (за 30 хв)
+                            async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=10):
+                                if past_msg.date and (now_ts - past_msg.date.timestamp()) < 1800:
+                                    if past_msg.text and ("Відключення світла" in past_msg.text or "наявності світла" in past_msg.text):
+                                        # Порівнюємо адреси: якщо ВСІ нові адреси вже є в тому пості — дублікат
+                                        past_locs = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', past_msg.text)) - _STOP
+                                        if new_locations and new_locations.issubset(past_locs):
                                             is_duplicate = True
-                                            break
+                                        break
                         except Exception as e:
                             logger.error(f"Stateless dedup error (light): {e}")
                             
@@ -215,18 +216,17 @@ class UtilityMonitor:
                             new_ones = new_locations - self.water_published_locations
                             logger.info(f"💧 Cooldown bypass: нова адреса {new_ones}! Публікуємо.")
                         
-                        # STATELESS DEDUPLICATION
+                        # STATELESS DEDUPLICATION (по адресах)
                         is_duplicate = False
                         try:
                             now_ts = time.time()
-                            clean_test = re.sub(r'[^\w\s]', '', clean_text.lower())
-                            async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=15):
-                                if past_msg.date and (now_ts - past_msg.date.timestamp()) < 7200:
-                                    if past_msg.text:
-                                        past_clean = re.sub(r'[^\w\s]', '', past_msg.text.lower())
-                                        if clean_test in past_clean or past_clean in clean_test:
+                            async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=10):
+                                if past_msg.date and (now_ts - past_msg.date.timestamp()) < 1800:
+                                    if past_msg.text and ("Відключення води" in past_msg.text or "наявності води" in past_msg.text):
+                                        past_locs = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', past_msg.text)) - _STOP
+                                        if new_locations and new_locations.issubset(past_locs):
                                             is_duplicate = True
-                                            break
+                                        break
                         except Exception as e:
                             logger.error(f"Stateless dedup error (water): {e}")
                             
