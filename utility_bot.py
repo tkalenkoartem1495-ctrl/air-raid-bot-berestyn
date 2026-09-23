@@ -152,15 +152,26 @@ class UtilityMonitor:
                         # Витягуємо назви районів/вулиць (виключаємо шаблонні слова)
                         new_locations = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', clean_text)) - _STOP
                         
-                        # STATELESS DEDUPLICATION (по адресах, вікно 30 хв)
+                        is_yellow = "🟡" in clean_text or "Питання щодо наявності" in clean_text
+                        
+                        # STATELESS DEDUPLICATION (вікно 30 хв)
                         is_duplicate = False
                         try:
                             now_ts = time.time()
                             # Шукаємо найсвіжіший наш пост про світло у каналі
                             async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=10):
                                 if past_msg.date and (now_ts - past_msg.date.timestamp()) < DEDUP_WINDOW:
-                                    if past_msg.text and ("Відключення світла" in past_msg.text or "наявності світла" in past_msg.text):
-                                        # Порівнюємо адреси: якщо ВСІ нові адреси вже є в тому пості — дублікат
+                                    if not past_msg.text:
+                                        continue
+                                        
+                                    # Якщо це ЖОВТИЙ СТАТУС (питання): перевіряємо, чи були будь-які питання за останні 30 хв
+                                    if is_yellow and "Питання щодо наявності світла" in past_msg.text:
+                                        is_duplicate = True
+                                        logger.info("💡 Жовтий статус на кулдауні (вже питали про світло за останні 30 хв).")
+                                        break
+                                        
+                                    # Якщо це ЧЕРВОНИЙ СТАТУС (відключення): порівнюємо по адресах тільки з червоними постами
+                                    elif not is_yellow and "Відключення світла" in past_msg.text:
                                         past_locs = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', past_msg.text)) - _STOP
                                         if new_locations and new_locations.issubset(past_locs):
                                             is_duplicate = True
@@ -183,13 +194,22 @@ class UtilityMonitor:
                         
                         new_locations = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', clean_text)) - _STOP
                         
-                        # STATELESS DEDUPLICATION (по адресах, вікно 30 хв)
+                        is_yellow = "🟡" in clean_text or "Питання щодо наявності" in clean_text
+                        
+                        # STATELESS DEDUPLICATION (вікно 30 хв)
                         is_duplicate = False
                         try:
                             now_ts = time.time()
                             async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=10):
                                 if past_msg.date and (now_ts - past_msg.date.timestamp()) < DEDUP_WINDOW:
-                                    if past_msg.text and ("Відключення води" in past_msg.text or "наявності води" in past_msg.text):
+                                    if not past_msg.text:
+                                        continue
+                                        
+                                    if is_yellow and "Питання щодо наявності води" in past_msg.text:
+                                        is_duplicate = True
+                                        logger.info("💧 Жовтий статус на кулдауні (вже питали про воду за останні 30 хв).")
+                                        break
+                                    elif not is_yellow and "Відключення води" in past_msg.text:
                                         past_locs = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', past_msg.text)) - _STOP
                                         if new_locations and new_locations.issubset(past_locs):
                                             is_duplicate = True
