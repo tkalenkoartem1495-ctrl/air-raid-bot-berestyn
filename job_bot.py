@@ -230,7 +230,7 @@ class JobBot:
                                 now_ts = time.time()
                                 async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=20):
                                     if past_msg.date and (now_ts - past_msg.date.timestamp()) < 86400:
-                                        if past_msg.text and "Вакансії" in past_msg.text:
+                                        if past_msg.text and "💼 Вакансії" in past_msg.text and "За останню добу" in past_msg.text:
                                             msg_date_local = past_msg.date.astimezone(self.tz).strftime("%m-%d")
                                             if msg_date_local == date_key:
                                                 is_duplicate = True
@@ -270,7 +270,7 @@ class JobBot:
                     now_ts = time.time()
                     async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=20):
                         if past_msg.date and (now_ts - past_msg.date.timestamp()) < 86400:
-                            if past_msg.text and "Вакансії" in past_msg.text:
+                            if past_msg.text and "💼 Вакансії" in past_msg.text and "За останню добу" in past_msg.text:
                                 msg_date_local = past_msg.date.astimezone(self.tz).strftime("%m-%d")
                                 if msg_date_local == date_key:
                                     is_duplicate = True
