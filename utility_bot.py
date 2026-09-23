@@ -133,7 +133,7 @@ class UtilityMonitor:
         DEDUP_WINDOW = 1800  # 30 хвилин для дедуплікатора
 
         while True:
-            await asyncio.sleep(120)
+            await asyncio.sleep(POLL_INTERVAL)
             
             now_ts = time.time()
             # 1. ПЕРЕВІРКА ПАЧКИ (Публікація зібраних адрес світла, якщо минув час)
@@ -242,18 +242,24 @@ class UtilityMonitor:
                                         self.light_accumulating_until = now_ts + 1800
                                         self.light_accumulated_locations.update(actual_locs)
                                     else:
-                                        await self.light_bot.send_message(
-                                            chat_id=TELEGRAM_CHAT_ID,
-                                            text=formatted_text
-                                        )
-                                        logger.info(f"💡 Відправлено статус світла: {formatted_text}")
+                                        try:
+                                            await self.light_bot.send_message(
+                                                chat_id=TELEGRAM_CHAT_ID,
+                                                text=formatted_text
+                                            )
+                                            logger.info(f"💡 Відправлено статус світла: {formatted_text}")
+                                        except Exception as e:
+                                            logger.error(f"Light send error: {e}")
                             else:
                                 # Жовті повідомлення просто публікуємо відформатованими
-                                await self.light_bot.send_message(
-                                    chat_id=TELEGRAM_CHAT_ID,
-                                    text=formatted_text
-                                )
-                                logger.info(f"💡 Відправлено статус світла: {formatted_text}")
+                                try:
+                                    await self.light_bot.send_message(
+                                        chat_id=TELEGRAM_CHAT_ID,
+                                        text=formatted_text
+                                    )
+                                    logger.info(f"💡 Відправлено статус світла: {formatted_text}")
+                                except Exception as e:
+                                    logger.error(f"Light yellow send error: {e}")
                         else:
                             logger.info("💡 Дублікат (ті самі адреси за 30 хв). Пропускаємо.")
                         
@@ -288,11 +294,14 @@ class UtilityMonitor:
                             
                         if not is_duplicate:
                             formatted_text = self._format_status_message(clean_text)
-                            await self.water_bot.send_message(
-                                chat_id=TELEGRAM_CHAT_ID,
-                                text=formatted_text
-                            )
-                            logger.info(f"💧 Відправлено статус води: {formatted_text}")
+                            try:
+                                await self.water_bot.send_message(
+                                    chat_id=TELEGRAM_CHAT_ID,
+                                    text=formatted_text
+                                )
+                                logger.info(f"💧 Відправлено статус води: {formatted_text}")
+                            except Exception as e:
+                                logger.error(f"Water send error: {e}")
                         else:
                             logger.info("💧 Дублікат (ті самі адреси за 30 хв). Пропускаємо.")
                         
