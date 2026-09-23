@@ -76,6 +76,11 @@ class UtilityMonitor:
         self.light_accumulating_until = 0
         self.light_accumulated_locations = set()
 
+        # Вода: кулдаун 30 хв
+        self.water_cooldown_until = 0
+        self.water_accumulated_locations = set()
+        self.water_has_yellow = False
+
         # Реєструємо обробник нових повідомлень
         self.client.on(events.NewMessage)(self._on_new_message)
         self.client.on(events.MessageEdited)(self._on_new_message)
@@ -143,7 +148,35 @@ class UtilityMonitor:
         while True:
             await asyncio.sleep(POLL_INTERVAL)
             
+            
             now_ts = time.time()
+            
+            # --- ПЕРЕВІРКА КУЛДАУНУ ВОДИ ---
+            if now_ts >= self.water_cooldown_until and (self.water_accumulated_locations or self.water_has_yellow):
+                locs = list(self.water_accumulated_locations)
+                if "Берестин" in locs and len(locs) > 1:
+                    locs.remove("Берестин")
+                    
+                if self.water_accumulated_locations:
+                    header = "🔵 Відключення води:\n\n"
+                    for loc in locs:
+                        header += f"- {loc}\n"
+                    header += "- мешканці повідомляють про відсутність води"
+                    text_to_send = header
+                else:
+                    text_to_send = "🟡 Питання щодо наявності води:\n\n- Берестин\n- мешканці цікавляться станом водопостачання"
+                    
+                if self.water_bot:
+                    try:
+                        await self.water_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text_to_send)
+                        logger.info(f"💧 Відправлено зведення води (після сну): {text_to_send}")
+                    except Exception as e:
+                        logger.error(f"Water summary send error: {e}")
+                
+                self.water_accumulated_locations.clear()
+                self.water_has_yellow = False
+                self.water_cooldown_until = now_ts + 1800  # Спимо ще 30 хв
+
             # 1. ПЕРЕВІРКА ПАЧКИ (Публікація зібраних адрес світла, якщо минув час)
             if self.light_accumulated_locations and now_ts >= self.light_accumulating_until:
                 locs = list(self.light_accumulated_locations)
@@ -275,43 +308,40 @@ class UtilityMonitor:
                         clean_text = line.replace("[WATER]", "").strip()
                         clean_text = self._replace_city_name(clean_text)
                         
-                        new_locations = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', clean_text)) - _STOP
-                        
+                        new_locations = set(re.findall(r'[А-ЯІЇЄ][а-яіїє\']+', clean_text)) - _STOP
                         is_yellow = "🟡" in clean_text or "Питання щодо наявності" in clean_text
+                        actual_locs = new_locations if new_locations else {"Берестин"}
                         
-                        # STATELESS DEDUPLICATION (вікно 30 хв)
-                        is_duplicate = False
-                        try:
-                            now_ts = time.time()
-                            async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=10):
-                                if past_msg.date and (now_ts - past_msg.date.timestamp()) < DEDUP_WINDOW:
-                                    if not past_msg.text:
-                                        continue
-                                        
-                                    if is_yellow and "Питання щодо наявності води" in past_msg.text:
-                                        is_duplicate = True
-                                        logger.info("💧 Жовтий статус на кулдауні (вже питали про воду за останні 30 хв).")
-                                        break
-                                    elif not is_yellow and "Відключення води" in past_msg.text:
-                                        past_locs = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', past_msg.text)) - _STOP
-                                        if new_locations and new_locations.issubset(past_locs):
-                                            is_duplicate = True
-                                        break
-                        except Exception as e:
-                            logger.error(f"Stateless dedup error (water): {e}")
-                            
-                        if not is_duplicate:
+                        now_ts = time.time()
+                        
+                        # Якщо на старті не ініціалізували, перевіримо безстаново
+                        if self.water_cooldown_until == 0:
+                            try:
+                                async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=10):
+                                    if past_msg.date and (now_ts - past_msg.date.timestamp()) < DEDUP_WINDOW:
+                                        if past_msg.text and ("Відключення води" in past_msg.text or "Питання щодо наявності води" in past_msg.text):
+                                            self.water_cooldown_until = past_msg.date.timestamp() + 1800
+                                            break
+                            except Exception as e:
+                                pass
+                                
+                        if now_ts < self.water_cooldown_until:
+                            # Бот спить - акумулюємо
+                            if is_yellow:
+                                self.water_has_yellow = True
+                            else:
+                                self.water_accumulated_locations.update(actual_locs)
+                            logger.info(f"💧 Режим сну. Додано до зведення води: {actual_locs}")
+                        else:
+                            # Бот не спить - відправляємо і засинаємо
                             formatted_text = self._format_status_message(clean_text)
                             try:
-                                await self.water_bot.send_message(
-                                    chat_id=TELEGRAM_CHAT_ID,
-                                    text=formatted_text
-                                )
+                                await self.water_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=formatted_text)
                                 logger.info(f"💧 Відправлено статус води: {formatted_text}")
                             except Exception as e:
                                 logger.error(f"Water send error: {e}")
-                        else:
-                            logger.info("💧 Дублікат (ті самі адреси за 30 хв). Пропускаємо.")
+                                
+                            self.water_cooldown_until = now_ts + 1800
                         
             except Exception as e:
                 logger.error(f"Помилка обробки Gemini або відправки: {e}")
