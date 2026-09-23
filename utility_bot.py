@@ -10,12 +10,11 @@ import asyncio
 import logging
 import os
 import re
+import time
 
 from telethon import TelegramClient, events
 from telegram import Bot
-from telegram.constants import ParseMode
 import google.generativeai as genai
-import re
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +25,6 @@ WATER_BOT_TOKEN = os.environ.get("WATER_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 MONITORED_CHATS = ["krasnogradbezp", "krasnograd3serzem"]
-
-
 
 PROMPT = """Ти моніториш повідомлення мешканців щодо світла та води у місцевих чатах міста Берестин.
 Прочитай цей батч повідомлень. Твоє завдання — публікувати ТІЛЬКИ інформацію про фактичні відключення або ЗАПИТАННЯ щодо наявності послуг.
@@ -41,37 +38,27 @@ PROMPT = """Ти моніториш повідомлення мешканців 
 
 ПРАВИЛА:
 1. ВІДПОВІДАЙ ВИКЛЮЧНО УКРАЇНСЬКОЮ МОВОЮ (навіть якщо оригінали російською).
-2. Завжди використовуй назву міста Берестин (замість Красноград). Назви районів перекладай: "Высокое" → "Високе", "Песчаная/Піщана/Piщанка" → "Піщанка" тощо.
+2. Завжди використовуй назву міста Берестин (замість Красноград). Назви районів перекладай: "Высокое" → "Високе", "Песчаная/Піщана/Piщанка" → "Піщанка". ВАЖЛИВО: Піщанка — це не мікрорайон і не вулиця, пиши просто "Піщанка".
 3. ІГНОРУЙ загальні обговорення, графіки на майбутнє, рекламу, оголошення.
 4. ІГНОРУЙ повідомлення про відновлення послуги (знак "+", слова "дали", "є", "з'явилось").
 5. Якщо люди СТВЕРДЖУЮТЬ про відсутність (знак "-", "нема", "відключили", "зникло") — це ФАКТИЧНЕ відключення. Використовуй 🔴 (світло) або 🔵 (вода): "Відключення...".
 6. Якщо люди лише ПИТАЮТЬ ("є світло?", "що з водою?") — НЕВИЗНАЧЕНІСТЬ. Використовуй 🟡: "Питання щодо наявності...". НЕ ПИШИ "Відключення" для питань.
 7. Якщо є кілька схожих повідомлень — узагальнюй їх в одне.
 8. Якщо нічого релевантного немає — поверни слово NONE.
-
 9. ВАЖЛИВО: назвою вулиці/мікрорайону може бути ТІЛЬКИ реальна географічна назва (Шевченко, Піщанка, Короленко, Центр, тощо). НЕ вважай звичайні слова назвами районів: "погода", "дирка", "капут", "все", "нема", "відсутність" — це НЕ назви місць. Якщо в повідомленні немає конкретної адреси/вулиці — просто пиши "Берестин" без вигадування назви.
 
 Приклади ідеальної відповіді:
-[LIGHT] 🔴 Відключення світла: мікрорайон Високе, вул. Піщанка (мешканці повідомляють про відсутність світла).
+[LIGHT] 🔴 Відключення світла: мікрорайон Високе, Піщанка (мешканці повідомляють про відсутність світла).
 [LIGHT] 🟡 Питання щодо наявності світла: район Центр (мешканці питають про наявність).
 [WATER] 🔵 Відключення води: мікрорайон Центральний.
 """
 
-
-import time
 
 class UtilityMonitor:
     def __init__(self, client: TelegramClient):
         self.client = client
         self.light_bot = Bot(token=LIGHT_BOT_TOKEN) if LIGHT_BOT_TOKEN else None
         self.water_bot = Bot(token=WATER_BOT_TOKEN) if WATER_BOT_TOKEN else None
-        
-        # Таймери блокування (cooldown) у секундах (10 хвилин = 600 сек)
-        self.light_cooldown_until = 0
-        self.water_cooldown_until = 0
-        # Адреси/райони з останнього поста (для bypass cooldown при новій адресі)
-        self.light_published_locations = set()
-        self.water_published_locations = set()
         
         if GEMINI_API_KEY:
             genai.configure(api_key=GEMINI_API_KEY)
@@ -121,12 +108,11 @@ class UtilityMonitor:
 
     async def _process_batch_loop(self):
         """Фонова задача, яка кожні 2 хвилини відправляє батч в Gemini."""
+        _STOP = {"Відключення", "Берестин", "Питання", "Наявності", "Мешканці", "Повідомляють", "Відсутність"}
+        DEDUP_WINDOW = 1800  # 30 хвилин для дедуплікатора
+
         while True:
             await asyncio.sleep(120)
-            
-            now = time.time()
-            light_cooldown_active = now < self.light_cooldown_until
-            water_cooldown_active = now < self.water_cooldown_until
             
             async with self.lock:
                 if not self.batch:
@@ -139,8 +125,6 @@ class UtilityMonitor:
                 logger.error("GEMINI_API_KEY не задано! Пропускаю батч.")
                 continue
 
-            # Завжди просимо ШІ проаналізувати — cooldown буде перевірятись ПІСЛЯ,
-            # щоб ми могли пропустити його якщо нова адреса
             dynamic_prompt = PROMPT + "\n\nДИНАМІЧНІ ПРАВИЛА (ВАЖЛИВО!):\n"
             dynamic_prompt += "- Якщо є скарги або питання про світло, створи ОДНЕ зведене повідомлення і почни його з тегу [LIGHT].\n"
             dynamic_prompt += "- Якщо є скарги або питання про воду, створи ОДНЕ зведене повідомлення і почни його з тегу [WATER].\n"
@@ -166,24 +150,15 @@ class UtilityMonitor:
                         clean_text = self._replace_city_name(clean_text)
                         
                         # Витягуємо назви районів/вулиць (виключаємо шаблонні слова)
-                        _STOP = {"Відключення", "Берестин", "Питання", "Наявності", "Мешканці", "Повідомляють", "Відсутність"}
                         new_locations = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', clean_text)) - _STOP
                         
-                        # Перевіряємо: якщо cooldown активний і всі нові адреси вже є в останньому пості — пропускаємо
-                        if light_cooldown_active and new_locations and new_locations.issubset(self.light_published_locations):
-                            logger.info(f"💡 Cooldown: ті самі адреси вже опубліковано ({new_locations}). Пропускаємо.")
-                            continue
-                        elif light_cooldown_active and new_locations:
-                            new_ones = new_locations - self.light_published_locations
-                            logger.info(f"💡 Cooldown bypass: нова адреса {new_ones}! Публікуємо.")
-                        
-                        # STATELESS DEDUPLICATION (по адресах, не по всьому тексту)
+                        # STATELESS DEDUPLICATION (по адресах, вікно 30 хв)
                         is_duplicate = False
                         try:
                             now_ts = time.time()
-                            # Шукаємо найсвіжіший наш пост про світло у каналі (за 30 хв)
+                            # Шукаємо найсвіжіший наш пост про світло у каналі
                             async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=10):
-                                if past_msg.date and (now_ts - past_msg.date.timestamp()) < 1800:
+                                if past_msg.date and (now_ts - past_msg.date.timestamp()) < DEDUP_WINDOW:
                                     if past_msg.text and ("Відключення світла" in past_msg.text or "наявності світла" in past_msg.text):
                                         # Порівнюємо адреси: якщо ВСІ нові адреси вже є в тому пості — дублікат
                                         past_locs = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', past_msg.text)) - _STOP
@@ -199,31 +174,21 @@ class UtilityMonitor:
                                 text=clean_text
                             )
                             logger.info(f"💡 Відправлено статус світла: {clean_text}")
-                            self.light_cooldown_until = time.time() + 600
-                            self.light_published_locations = new_locations
                         else:
-                            logger.info("Повідомлення про світло вже було опубліковано недавно. Пропускаємо.")
+                            logger.info("💡 Дублікат (ті самі адреси за 30 хв). Пропускаємо.")
                         
                     elif "[WATER]" in line and self.water_bot:
                         clean_text = line.replace("[WATER]", "").strip()
                         clean_text = self._replace_city_name(clean_text)
                         
-                        _STOP = {"Відключення", "Берестин", "Питання", "Наявності", "Мешканці", "Повідомляють", "Відсутність"}
                         new_locations = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', clean_text)) - _STOP
                         
-                        if water_cooldown_active and new_locations and new_locations.issubset(self.water_published_locations):
-                            logger.info(f"💧 Cooldown: ті самі адреси вже опубліковано ({new_locations}). Пропускаємо.")
-                            continue
-                        elif water_cooldown_active and new_locations:
-                            new_ones = new_locations - self.water_published_locations
-                            logger.info(f"💧 Cooldown bypass: нова адреса {new_ones}! Публікуємо.")
-                        
-                        # STATELESS DEDUPLICATION (по адресах)
+                        # STATELESS DEDUPLICATION (по адресах, вікно 30 хв)
                         is_duplicate = False
                         try:
                             now_ts = time.time()
                             async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=10):
-                                if past_msg.date and (now_ts - past_msg.date.timestamp()) < 1800:
+                                if past_msg.date and (now_ts - past_msg.date.timestamp()) < DEDUP_WINDOW:
                                     if past_msg.text and ("Відключення води" in past_msg.text or "наявності води" in past_msg.text):
                                         past_locs = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', past_msg.text)) - _STOP
                                         if new_locations and new_locations.issubset(past_locs):
@@ -238,10 +203,8 @@ class UtilityMonitor:
                                 text=clean_text
                             )
                             logger.info(f"💧 Відправлено статус води: {clean_text}")
-                            self.water_cooldown_until = time.time() + 600
-                            self.water_published_locations = new_locations
                         else:
-                            logger.info("Повідомлення про воду вже було опубліковано недавно. Пропускаємо.")
+                            logger.info("💧 Дублікат (ті самі адреси за 30 хв). Пропускаємо.")
                         
             except Exception as e:
                 logger.error(f"Помилка обробки Gemini або відправки: {e}")
@@ -255,4 +218,3 @@ class UtilityMonitor:
         
         # Запускаємо безкінечний цикл батчингу як фонову таску
         asyncio.create_task(self._process_batch_loop())
-
