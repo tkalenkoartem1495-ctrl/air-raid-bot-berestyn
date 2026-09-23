@@ -68,6 +68,27 @@ class UtilityMonitor:
 
         self.batch = []
         self.lock = asyncio.Lock()
+        
+        # Спам-контроль для світла (накопичення при >3 скаргах за 15 хв)
+        self.light_outage_timestamps = []
+        self.light_accumulating_until = 0
+        self.light_accumulated_locations = set()
+
+    def _format_status_message(self, clean_text: str) -> str:
+        """Перетворює текст в список з булітами."""
+        match = re.match(r"(🔴 Відключення світла:|🔵 Відключення води:|🟡 Питання щодо наявності світла:|🟡 Питання щодо наявності води:)\s*(.*)", clean_text)
+        if match:
+            header = match.group(1)
+            rest = match.group(2)
+            rest = re.sub(r'\(мешканці.*?\)', '', rest).strip()
+            locs = [l.strip().rstrip('.') for l in rest.split(',') if l.strip()]
+            
+            formatted = header + "\n\n"
+            for loc in locs:
+                if loc:
+                    formatted += f"- {loc}\n"
+            return formatted.strip()
+        return clean_text
 
         # Реєструємо обробник нових повідомлень (перевірка каналів буде всередині)
         self.client.on(events.NewMessage)(
@@ -114,6 +135,27 @@ class UtilityMonitor:
         while True:
             await asyncio.sleep(120)
             
+            now_ts = time.time()
+            # 1. ПЕРЕВІРКА ПАЧКИ (Публікація зібраних адрес світла, якщо минув час)
+            if self.light_accumulated_locations and now_ts >= self.light_accumulating_until:
+                locs = list(self.light_accumulated_locations)
+                if "Берестин" in locs and len(locs) > 1:
+                    locs.remove("Берестин")
+                
+                header = "🔴 Відключення світла:\n\n"
+                for loc in locs:
+                    header += f"- {loc}\n"
+                
+                try:
+                    await self.light_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=header.strip())
+                    logger.info(f"🕒 ПАЧКА ОПУБЛІКОВАНА: {locs}")
+                except Exception as e:
+                    logger.error(f"Error sending accumulated batch: {e}")
+                
+                self.light_accumulated_locations.clear()
+                self.light_outage_timestamps.clear()
+                self.light_accumulating_until = 0
+
             async with self.lock:
                 if not self.batch:
                     continue
@@ -180,11 +222,38 @@ class UtilityMonitor:
                             logger.error(f"Stateless dedup error (light): {e}")
                             
                         if not is_duplicate:
-                            await self.light_bot.send_message(
-                                chat_id=TELEGRAM_CHAT_ID,
-                                text=clean_text
-                            )
-                            logger.info(f"💡 Відправлено статус світла: {clean_text}")
+                            formatted_text = self._format_status_message(clean_text)
+                            now_ts = time.time()
+                            
+                            if not is_yellow:
+                                actual_locs = new_locations if new_locations else {"Берестин"}
+                                is_accumulating = now_ts < self.light_accumulating_until
+                                
+                                if is_accumulating:
+                                    self.light_accumulated_locations.update(actual_locs)
+                                    logger.info(f"💡 📦 Режим збору. Додано до пачки: {actual_locs}")
+                                else:
+                                    # Очищаємо старі таймстемпи (старші 15 хв = 900 сек)
+                                    self.light_outage_timestamps = [ts for ts in self.light_outage_timestamps if now_ts - ts < 900]
+                                    self.light_outage_timestamps.append(now_ts)
+                                    
+                                    if len(self.light_outage_timestamps) >= 3:
+                                        logger.info("💡 🚨 СПАМ-КОНТРОЛЬ! 3 повідомлення за 15 хв. Вмикаємо режим збору на 30 хв.")
+                                        self.light_accumulating_until = now_ts + 1800
+                                        self.light_accumulated_locations.update(actual_locs)
+                                    else:
+                                        await self.light_bot.send_message(
+                                            chat_id=TELEGRAM_CHAT_ID,
+                                            text=formatted_text
+                                        )
+                                        logger.info(f"💡 Відправлено статус світла: {formatted_text}")
+                            else:
+                                # Жовті повідомлення просто публікуємо відформатованими
+                                await self.light_bot.send_message(
+                                    chat_id=TELEGRAM_CHAT_ID,
+                                    text=formatted_text
+                                )
+                                logger.info(f"💡 Відправлено статус світла: {formatted_text}")
                         else:
                             logger.info("💡 Дублікат (ті самі адреси за 30 хв). Пропускаємо.")
                         
@@ -218,11 +287,12 @@ class UtilityMonitor:
                             logger.error(f"Stateless dedup error (water): {e}")
                             
                         if not is_duplicate:
+                            formatted_text = self._format_status_message(clean_text)
                             await self.water_bot.send_message(
                                 chat_id=TELEGRAM_CHAT_ID,
-                                text=clean_text
+                                text=formatted_text
                             )
-                            logger.info(f"💧 Відправлено статус води: {clean_text}")
+                            logger.info(f"💧 Відправлено статус води: {formatted_text}")
                         else:
                             logger.info("💧 Дублікат (ті самі адреси за 30 хв). Пропускаємо.")
                         
