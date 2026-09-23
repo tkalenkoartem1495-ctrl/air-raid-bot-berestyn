@@ -258,4 +258,36 @@ class JobBot:
         logger.info("=" * 50)
         logger.info("💼 Бот 'Робота / Вакансії' запущено!")
         logger.info("=" * 50)
+        
+        # Catch-up logic: check if we missed today's 17:30 post
+        try:
+            now = datetime.now(self.tz)
+            date_key = now.strftime("%m-%d")
+            if now.hour >= 17 and (now.hour > 17 or now.minute >= 30):
+                is_duplicate = False
+                if self.client:
+                    import time
+                    now_ts = time.time()
+                    async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=20):
+                        if past_msg.date and (now_ts - past_msg.date.timestamp()) < 86400:
+                            if past_msg.text and "Вакансії" in past_msg.text:
+                                msg_date_local = past_msg.date.astimezone(self.tz).strftime("%m-%d")
+                                if msg_date_local == date_key:
+                                    is_duplicate = True
+                                    break
+                
+                if not is_duplicate:
+                    logger.info("💼 Пропущено пост про вакансії! Публікуємо зараз...")
+                    report = await self._fetch_and_process()
+                    await self.bot.send_message(
+                        chat_id=TELEGRAM_CHAT_ID,
+                        text=report,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True
+                    )
+                    self.last_posted_date = date_key
+                    logger.info("✅ Пропущений пост про вакансії успішно опубліковано!")
+        except Exception as e:
+            logger.error(f"Помилка при catch-up перевірці (Робота): {e}")
+            
         asyncio.create_task(self._scheduler_loop())
