@@ -64,9 +64,12 @@ class UtilityMonitor:
         self.light_bot = Bot(token=LIGHT_BOT_TOKEN) if LIGHT_BOT_TOKEN else None
         self.water_bot = Bot(token=WATER_BOT_TOKEN) if WATER_BOT_TOKEN else None
         
-        # Таймери блокування (cooldown) у секундах (30 хвилин = 1800 сек)
+        # Таймери блокування (cooldown) у секундах (10 хвилин = 600 сек)
         self.light_cooldown_until = 0
         self.water_cooldown_until = 0
+        # Адреси/райони з останнього поста (для bypass cooldown при новій адресі)
+        self.light_published_locations = set()
+        self.water_published_locations = set()
         
         if GEMINI_API_KEY:
             genai.configure(api_key=GEMINI_API_KEY)
@@ -120,16 +123,11 @@ class UtilityMonitor:
             await asyncio.sleep(120)
             
             now = time.time()
-            light_active = now >= self.light_cooldown_until
-            water_active = now >= self.water_cooldown_until
+            light_cooldown_active = now < self.light_cooldown_until
+            water_cooldown_active = now < self.water_cooldown_until
             
             async with self.lock:
                 if not self.batch:
-                    continue
-                    
-                # Якщо обидва боти на кулдауні, просто викидаємо повідомлення
-                if not light_active and not water_active:
-                    self.batch.clear()
                     continue
                     
                 messages_to_process = list(self.batch)
@@ -139,16 +137,11 @@ class UtilityMonitor:
                 logger.error("GEMINI_API_KEY не задано! Пропускаю батч.")
                 continue
 
+            # Завжди просимо ШІ проаналізувати — cooldown буде перевірятись ПІСЛЯ,
+            # щоб ми могли пропустити його якщо нова адреса
             dynamic_prompt = PROMPT + "\n\nДИНАМІЧНІ ПРАВИЛА (ВАЖЛИВО!):\n"
-            if light_active:
-                dynamic_prompt += "- Якщо є скарги або питання про світло, створи ОДНЕ зведене повідомлення і почни його з тегу [LIGHT].\n"
-            else:
-                dynamic_prompt += "- ІГНОРУЙ БУДЬ-ЯКІ СКАРГИ НА СВІТЛО. Інформація вже опублікована. Не генеруй [LIGHT].\n"
-                
-            if water_active:
-                dynamic_prompt += "- Якщо є скарги або питання про воду, створи ОДНЕ зведене повідомлення і почни його з тегу [WATER].\n"
-            else:
-                dynamic_prompt += "- ІГНОРУЙ БУДЬ-ЯКІ СКАРГИ НА ВОДУ. Інформація вже опублікована. Не генеруй [WATER].\n"
+            dynamic_prompt += "- Якщо є скарги або питання про світло, створи ОДНЕ зведене повідомлення і почни його з тегу [LIGHT].\n"
+            dynamic_prompt += "- Якщо є скарги або питання про воду, створи ОДНЕ зведене повідомлення і почни його з тегу [WATER].\n"
 
             batch_text = "\n---\n".join(messages_to_process)
             full_prompt = f"{dynamic_prompt}\n\nПовідомлення:\n{batch_text}"
@@ -166,9 +159,21 @@ class UtilityMonitor:
                     if not line:
                         continue
                         
-                    if "[LIGHT]" in line and self.light_bot and light_active:
+                    if "[LIGHT]" in line and self.light_bot:
                         clean_text = line.replace("[LIGHT]", "").strip()
                         clean_text = self._replace_city_name(clean_text)
+                        
+                        # Витягуємо назви районів/вулиць (виключаємо шаблонні слова)
+                        _STOP = {"Відключення", "Берестин", "Питання", "Наявності", "Мешканці", "Повідомляють", "Відсутність"}
+                        new_locations = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', clean_text)) - _STOP
+                        
+                        # Перевіряємо: якщо cooldown активний і всі нові адреси вже є в останньому пості — пропускаємо
+                        if light_cooldown_active and new_locations and new_locations.issubset(self.light_published_locations):
+                            logger.info(f"💡 Cooldown: ті самі адреси вже опубліковано ({new_locations}). Пропускаємо.")
+                            continue
+                        elif light_cooldown_active and new_locations:
+                            new_ones = new_locations - self.light_published_locations
+                            logger.info(f"💡 Cooldown bypass: нова адреса {new_ones}! Публікуємо.")
                         
                         # STATELESS DEDUPLICATION
                         is_duplicate = False
@@ -191,13 +196,24 @@ class UtilityMonitor:
                                 text=clean_text
                             )
                             logger.info(f"💡 Відправлено статус світла: {clean_text}")
-                            self.light_cooldown_until = time.time() + 1800
+                            self.light_cooldown_until = time.time() + 600
+                            self.light_published_locations = new_locations
                         else:
                             logger.info("Повідомлення про світло вже було опубліковано недавно. Пропускаємо.")
                         
-                    elif "[WATER]" in line and self.water_bot and water_active:
+                    elif "[WATER]" in line and self.water_bot:
                         clean_text = line.replace("[WATER]", "").strip()
                         clean_text = self._replace_city_name(clean_text)
+                        
+                        _STOP = {"Відключення", "Берестин", "Питання", "Наявності", "Мешканці", "Повідомляють", "Відсутність"}
+                        new_locations = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', clean_text)) - _STOP
+                        
+                        if water_cooldown_active and new_locations and new_locations.issubset(self.water_published_locations):
+                            logger.info(f"💧 Cooldown: ті самі адреси вже опубліковано ({new_locations}). Пропускаємо.")
+                            continue
+                        elif water_cooldown_active and new_locations:
+                            new_ones = new_locations - self.water_published_locations
+                            logger.info(f"💧 Cooldown bypass: нова адреса {new_ones}! Публікуємо.")
                         
                         # STATELESS DEDUPLICATION
                         is_duplicate = False
@@ -220,7 +236,8 @@ class UtilityMonitor:
                                 text=clean_text
                             )
                             logger.info(f"💧 Відправлено статус води: {clean_text}")
-                            self.water_cooldown_until = time.time() + 1800
+                            self.water_cooldown_until = time.time() + 600
+                            self.water_published_locations = new_locations
                         else:
                             logger.info("Повідомлення про воду вже було опубліковано недавно. Пропускаємо.")
                         
