@@ -22,8 +22,8 @@ ALERTS_API_TOKEN = os.environ.get("ALERTS_API_TOKEN", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# Інтервал опитування API (секунди). API має ліміт ~8-10 запитів/хв.
-POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "10"))
+# Інтервал опитування API тривог (секунди). Ліміт alerts.in.ua ~8-10 запитів/хв, опитуємо кожні 8 сек.
+POLL_INTERVAL = int(os.environ.get("ALERT_POLL_INTERVAL", "8"))
 
 # Район, який відслідковуємо.
 # API може використовувати як нову назву "Берестинський район",
@@ -355,17 +355,30 @@ class AlertMonitor:
         logger.info(f"💬 Telegram Chat ID: {TELEGRAM_CHAT_ID}")
         logger.info("=" * 50)
 
-        # Перший запит — не відправляємо повідомлення,
-        # просто ініціалізуємо стан.
+        # Перший запит
         alerts = await self.fetch_active_alerts()
         if alerts is not None:
             district_alerts = self.filter_district_alerts(alerts)
             for alert in district_alerts:
+                # Якщо тривога почалась менше 10 хвилин тому — можливо, сервер перезавантажувався і ми її пропустили
+                started_str = alert.get("started_at")
+                if started_str:
+                    try:
+                        s_dt = datetime.fromisoformat(started_str.replace("Z", "+00:00"))
+                        now_utc = datetime.now(timezone.utc)
+                        if (now_utc - s_dt).total_seconds() < 600:
+                            logger.info(f"🚨 Свіжа тривога при запуску ({int((now_utc - s_dt).total_seconds())} сек тому)! Буде надіслано сповіщення.")
+                            continue
+                    except Exception:
+                        pass
                 self.active_alerts[alert["id"]] = alert
             if district_alerts:
-                logger.info(f"ℹ️ При запуску вже активні {len(district_alerts)} тривоги (без сповіщення)")
+                logger.info(f"ℹ️ При запуску виявлено {len(district_alerts)} тривог у районі")
             else:
                 logger.info("ℹ️ При запуску активних тривог немає")
+            
+            # Опрацьовуємо свіжі тривоги, якщо вони є
+            await self.process_alerts(alerts)
 
         # Основний цикл
         while True:
