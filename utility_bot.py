@@ -92,7 +92,7 @@ class UtilityMonitor:
             header = match.group(1)
             rest = match.group(2)
             rest = re.sub(r'\(мешканці.*?\)', '', rest).strip()
-            locs = [l.strip().rstrip('.') for l in rest.split(',') if l.strip()]
+            locs = [l.strip().strip('.').strip() for l in rest.split(',') if l.strip().strip('.').strip()]
             if "Берестин" in locs and len(locs) > 1:
                 locs.remove("Берестин")
             
