@@ -98,7 +98,7 @@ async def main():
 
 
     # Ініціалізуємо всі боти
-    alert_monitor = AlertMonitor()
+    alert_monitor = AlertMonitor(client)
     channel_monitor = ChannelMonitor(client)
     utility_monitor = UtilityMonitor(client)
     railway_monitor = RailwayMonitor(client)

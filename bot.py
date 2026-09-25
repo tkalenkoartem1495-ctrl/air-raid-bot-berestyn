@@ -178,6 +178,7 @@ class AlertMonitor:
         self.client = client
         self.bot = Bot(token=TELEGRAM_BOT_TOKEN)
         self.active_alerts: dict[int, dict] = {}  # id -> alert data
+        self.published_starts: set[str] = set()
         self._session: aiohttp.ClientSession | None = None
         self._last_modified: str | None = None
 
@@ -271,30 +272,28 @@ class AlertMonitor:
                     f"(тип: {alert.get('alert_type')})"
                 )
                 msg = build_alert_on_message(alert)
+                started_time = format_time(alert.get("started_at"))
                 
-                # STATELESS DEDUPLICATION
+                # ДЕДУПЛІКАЦІЯ: перевіряємо, чи повідомлення з ідентичним часом вже опубліковано
                 is_duplicate = False
-                if self.client:
+                if started_time in self.published_starts:
+                    is_duplicate = True
+                    logger.info(f"🛡 Повітряна тривога з ідентичним часом ({started_time}) вже надсилалася в цій сесії.")
+                elif self.client:
                     try:
-                        import time
-                        now_ts = time.time()
-                        async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=10):
-                            if past_msg.date and (now_ts - past_msg.date.timestamp()) < 7200:
-                                if past_msg.text:
-                                    if "Повітряна тривога" in past_msg.text and "Увага" in past_msg.text:
-                                        # Last thing in channel was a siren! We shouldn't post another one.
-                                        is_duplicate = True
-                                        break
-                                    if "Відбій" in past_msg.text:
-                                        # Last thing was all clear, so we CAN post a new siren.
-                                        break
+                        async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=15):
+                            if past_msg.text and "Повітряна тривога" in past_msg.text and started_time in past_msg.text:
+                                is_duplicate = True
+                                logger.info(f"🛡 Повітряна тривога з ідентичним часом ({started_time}) вже є в каналі. Пропускаємо дублікат.")
+                                break
                     except Exception as e:
-                        logger.error(f"Stateless dedup error (bot): {e}")
+                        logger.error(f"Помилка дедуплікації тривоги: {e}")
                 
                 if not is_duplicate:
                     await self.send_telegram(msg)
+                    self.published_starts.add(started_time)
                 else:
-                    logger.info("Повітряна тривога вже опублікована недавно в каналі. Пропускаємо.")
+                    logger.info(f"Пропуск дубліката повідомлення про тривогу ({started_time}).")
                     
                 self.active_alerts[alert["id"]] = alert
 
@@ -344,7 +343,22 @@ class AlertMonitor:
             if not old_alert.get("finished_at"):
                 old_alert["finished_at"] = datetime.now(timezone.utc).isoformat()
             msg = build_alert_off_message(old_alert)
-            await self.send_telegram(msg)
+            started_time = format_time(old_alert.get("started_at"))
+            
+            # ДЕДУПЛІКАЦІЯ ВІДБОЮ
+            is_off_duplicate = False
+            if self.client:
+                try:
+                    async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=15):
+                        if past_msg.text and "Відбій" in past_msg.text and started_time in past_msg.text:
+                            is_off_duplicate = True
+                            logger.info(f"🛡 Відбій для тривоги від {started_time} вже є в каналі. Пропускаємо дублікат.")
+                            break
+                except Exception as e:
+                    logger.error(f"Помилка дедуплікації відбою: {e}")
+                    
+            if not is_off_duplicate:
+                await self.send_telegram(msg)
 
     async def run(self):
         """Головний цикл моніторингу."""
