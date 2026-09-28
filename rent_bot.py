@@ -55,6 +55,15 @@ class RentBot:
                     if not msg.raw_text or len(msg.raw_text.strip()) < 5:
                         continue
                         
+                    text_lower = msg.raw_text.lower()
+                    RENT_KEYWORDS = [
+                        "аренд", "оренд", "сним", "знім", "сдам", "здам", 
+                        "квартир", "дом", "будин", "комнат", "кімнат", 
+                        "житл", "жиль", "посуточн", "подобов", "поселен", "підселен"
+                    ]
+                    if not any(k in text_lower for k in RENT_KEYWORDS):
+                        continue
+                        
                     sender = await msg.get_sender()
                     username = "Невідомо"
                     if sender:
@@ -113,12 +122,12 @@ class RentBot:
                 
                 response = await asyncio.to_thread(self.model.generate_content, prompt)
                 resp_text = response.text.strip()
-                if resp_text.startswith("```json"):
-                    resp_text = resp_text[7:]
-                if resp_text.endswith("```"):
-                    resp_text = resp_text[:-3]
+                match = re.search(r'\{.*\}', resp_text, re.DOTALL)
+                if match:
+                    parsed = json.loads(match.group(0))
+                else:
+                    parsed = json.loads(resp_text)
                     
-                parsed = json.loads(resp_text.strip())
                 offering.extend(parsed.get("offering", []))
                 seeking.extend(parsed.get("seeking", []))
             except Exception as e:
