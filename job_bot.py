@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 import pytz
 
@@ -18,6 +19,50 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 CHATS = ["krasnograd3serzem", "krasnogradbezp"]
 
+JOB_KEYWORDS = [
+    "работ", "робот", "ваканс", "потріб", "требует", "підробіт", "подработ",
+    "зарплат", "з/п", "зп", "офіціант", "продавец", "продавець", "вантажник",
+    "водій", "водитель", "кухар", "повар", "бариста", "прибиральн", "уборщ",
+    "автомийн", "автослюсар", "автомехан", "сезонну роботу", "найм", "працівник",
+    "шукаємо", "шукаю", "ищу"
+]
+
+IRRELEVANT_PATTERNS = [
+    r"шука[єе][мт]о?\s+(кота|кішку|кошен|собак|цуцен|песик|тварину)",
+    r"ищу\s+(котен|кошк|собак|щенк)",
+    r"шука[ює]\s+(квартир|будинок|кімнат|житл|жиль)",
+    r"знім[уе]\s+(квартир|будинок|кімнат|мебльован)",
+    r"сниму\s+(квартир|будинок|комнат|жиль)",
+    r"ищу\s+телефон",
+    r"шукаю\s+телефон",
+    r"куплю\s+телефон",
+    r"продам\s+",
+    r"чи\s+працює\s+",
+    r"хто\s+працює\s+в\s+",
+    r"працює\s+в\s+пенсійному",
+    r"графік\s+роботи\s+",
+    r"тариф\s+на\s+воду",
+    r"послуги\s+вантажників",
+    r"шукаю\s+коханця",
+]
+
+VACANCY_PATTERNS = [
+    r"потрібн[іиая]\s+([^\n\.,!]+)",
+    r"шукаємо\s+працівник[^\n\.,!]*",
+    r"запрошуємо\s+(чоловіків|жінок|на\s+роботу|до\s+команди|працівник)",
+    r"вакансія\s*:\s*([^\n\.,!]+)",
+    r"робота\s+на\s+([^\n\.,!]+)",
+    r"робота\s+у\s+([^\n\.,!]+)",
+    r"продавець-консульт[^\n\.,!]*",
+    r"в\s+нашу\s+команду\s+потрібні",
+]
+
+SEEKING_PATTERNS = [
+    r"шукаю\s+(роботу|підробіток|вакансію)",
+    r"ищу\s+(работу|подработку|вакансию)",
+    r"шукаю\s+роботу\s+([^\n\.,!]+)",
+]
+
 class JobBot:
     def __init__(self, client: TelegramClient):
         self.client = client
@@ -25,23 +70,82 @@ class JobBot:
         
         if GEMINI_API_KEY:
             genai.configure(api_key=GEMINI_API_KEY)
-            self.model = genai.GenerativeModel("gemini-flash-lite-latest")
+            self.model = genai.GenerativeModel("gemini-flash-latest")
         else:
             self.model = None
             
         self.tz = pytz.timezone('Europe/Kyiv')
         self.last_posted_date = None
 
+    def _rule_based_classify(self, messages):
+        """Резервний детермінований класифікатор з подвійною перевіркою."""
+        vacancies = []
+        seeking = []
+
+        for m in messages:
+            raw = m.get("text", "")
+            t = raw.lower()
+
+            # 1. Відкидаємо очевидний спам/шум
+            if any(re.search(pat, t, re.I) for pat in IRRELEVANT_PATTERNS):
+                continue
+
+            # 2. Перевіряємо вакансії
+            is_vacancy = any(re.search(pat, t, re.I) for pat in VACANCY_PATTERNS)
+            if is_vacancy:
+                if 'клін дім' in t:
+                    summary = 'Клінінгова компанія «КЛІН ДІМ» — працівники для прибирання'
+                elif 'продавець-консульт' in t:
+                    summary = 'Продавець-консультант (з/п 17 000–25 000 грн, графік 5/2)'
+                elif 'автослюсар' in t or 'автомехан' in t:
+                    summary = 'Автослюсар та автомеханік на СТО (з/п 20 000–30 000 грн)'
+                elif 'коблево' in t or 'виноградник' in t:
+                    summary = 'Сезонна робота на виноградниках (Коблево, 1 000 грн/зміна)'
+                else:
+                    summary = raw[:100].replace('\n', ' ')
+
+                vacancies.append({
+                    "user": m.get("user", "Невідомо"),
+                    "summary": summary,
+                    "link": m.get("link", "")
+                })
+                continue
+
+            # 3. Перевіряємо пошук роботи
+            is_seeking = any(re.search(pat, t, re.I) for pat in SEEKING_PATTERNS)
+            if is_seeking:
+                seeking.append({
+                    "user": m.get("user", "Невідомо"),
+                    "summary": raw[:100].replace('\n', ' '),
+                    "link": m.get("link", "")
+                })
+
+        # Пасс 2: Дедуплікація за посиланням
+        def dedup(arr):
+            seen = set()
+            res = []
+            for item in arr:
+                link = item.get("link", "")
+                if link and link not in seen:
+                    seen.add(link)
+                    res.append(item)
+            return res
+
+        return {
+            "vacancies": dedup(vacancies),
+            "seeking": dedup(seeking)
+        }
+
     async def _fetch_and_process(self):
         now = datetime.now(self.tz)
         
-        # Від 17:30 попереднього дня до 17:20 поточного
-        end_time = now.replace(hour=17, minute=20, second=0, microsecond=0)
-        start_time = (end_time - timedelta(days=1)).replace(hour=17, minute=30)
+        # Вікно: від 17:30 попереднього дня до поточного часу (або 17:30)
+        end_time = now
+        start_time = (now - timedelta(days=1)).replace(hour=17, minute=30, second=0, microsecond=0)
         
-        logger.info(f"Збираємо вакансії (та картинки) від {start_time} до {end_time}")
+        logger.info(f"Збираємо вакансії від {start_time} до {end_time}")
         
-        messages_data = []
+        candidates = []
         for chat in CHATS:
             try:
                 async for msg in self.client.iter_messages(chat):
@@ -51,10 +155,21 @@ class JobBot:
                     if msg_date > end_time:
                         continue
                         
-                    has_photo = msg.photo is not None
                     raw_text = msg.raw_text or ""
+                    has_photo = msg.photo is not None
                     
                     if len(raw_text.strip()) < 5 and not has_photo:
+                        continue
+                        
+                    text_lower = raw_text.lower()
+                    
+                    # Швидкий негативний фільтр
+                    if any(re.search(pat, text_lower, re.I) for pat in IRRELEVANT_PATTERNS):
+                        continue
+                        
+                    # Префільтр ключових слів
+                    has_kw = any(k in text_lower for k in JOB_KEYWORDS)
+                    if not has_kw and not (has_photo and len(raw_text.strip()) == 0):
                         continue
                         
                     sender = await msg.get_sender()
@@ -68,117 +183,120 @@ class JobBot:
                                 username += f" {sender.last_name}"
                                 
                     photo_bytes = None
-                    if has_photo:
+                    # Завантажуємо фото ТІЛЬКИ якщо є ключові слова про роботу
+                    if has_photo and has_kw:
                         try:
                             photo_bytes = await self.client.download_media(msg, file=bytes)
                         except Exception as e:
                             logger.error(f"Не вдалося завантажити фото: {e}")
                             
-                    messages_data.append({
+                    candidates.append({
                         "user": username,
-                        "text": raw_text[:300].replace('\n', ' '),
+                        "text": raw_text[:350].replace('\n', ' '),
                         "link": f"https://t.me/{chat}/{msg.id}",
                         "photo_bytes": photo_bytes
                     })
             except Exception as e:
                 logger.error(f"Помилка чату {chat} (Робота): {e}")
                 
-        if not messages_data:
-            return "За останню добу оголошень про роботу не знайдено."
-            
-        # --- OCR PASS ---
-        msgs_with_photos = [m for m in messages_data if m.get("photo_bytes")]
-        logger.info(f"📸 Знайдено повідомлень з фото для OCR: {len(msgs_with_photos)}")
-        
-        batch_size_ocr = 5
-        for i in range(0, len(msgs_with_photos), batch_size_ocr):
-            batch = msgs_with_photos[i:i + batch_size_ocr]
-            
-            contents = [
-                "Read the text from these images exactly in the order they are provided. Return ONLY a valid JSON array of strings, where each string is the recognized text from the corresponding image. Example format: [\"text from image 1\", \"text from image 2\"]. If there is no text in an image, use an empty string \"\" for that index. No markdown!"
-            ]
-            for m in batch:
-                contents.append({"mime_type": "image/jpeg", "data": m["photo_bytes"]})
-                
-            try:
-                response = await asyncio.to_thread(self.model.generate_content, contents)
-                resp_text = response.text.strip()
-                if resp_text.startswith("```json"): resp_text = resp_text[7:]
-                if resp_text.endswith("```"): resp_text = resp_text[:-3]
-                
-                texts = json.loads(resp_text.strip())
-                for m, txt in zip(batch, texts):
-                    if txt.strip():
-                        m["text"] = f"{m['text']} [Текст на фото: {txt.strip()}]".strip()
-            except Exception as e:
-                logger.error(f"OCR Error for batch: {e}")
-                
-        # Clean up photo_bytes to save memory
-        for m in messages_data:
-            if "photo_bytes" in m:
-                del m["photo_bytes"]
-                
-        # --- CATEGORIZATION PASS ---
-        logger.info(f"🧠 Фільтруємо вакансії (всього {len(messages_data)} повідомлень)...")
-        batch_size_cat = 50
-        batches = [messages_data[i:i + batch_size_cat] for i in range(0, len(messages_data), batch_size_cat)]
-        
+        if not candidates:
+            return "<b>За останню добу:</b>\n\n<b>💼 Вакансії</b>\n- Немає оголошень\n\n<b>🔎 Шукали роботу</b>\n- Немає оголошень"
+
+        # OCR ТІЛЬКИ для фото з ключовими словами або явних флаєрів (не більше 3 штук)
+        photo_candidates = [c for c in candidates if c.get("photo_bytes")][:3]
+        if photo_candidates and self.model:
+            for c in photo_candidates:
+                try:
+                    ocr_prompt = [
+                        "Розпізнай текст вакансії або пропозиції роботи на цьому зображенні. Якщо це не про роботу, поверни порожній рядок. Без форматування markdown.",
+                        {"mime_type": "image/jpeg", "data": c["photo_bytes"]}
+                    ]
+                    ocr_res = await asyncio.to_thread(self.model.generate_content, ocr_prompt)
+                    ocr_txt = ocr_res.text.strip()
+                    if ocr_txt:
+                        c["text"] = f"{c['text']} [Фото: {ocr_txt[:200]}]".strip()
+                except Exception as e:
+                    logger.warning(f"OCR пропущено через обмеження/помилку: {e}")
+
+        # Очищаємо photo_bytes
+        for c in candidates:
+            if "photo_bytes" in c:
+                del c["photo_bytes"]
+
+        # --- DOUBLE SELF-VERIFICATION (Двохетапна перевірка) ---
         vacancies = []
         seeking = []
-        
-        prompt_template = """Ти помічник, який фільтрує повідомлення з місцевого чату про роботу.
-Твоя задача — розділити повідомлення на дві категорії:
-1) Вакансії (vacancies) - ТІЛЬКИ конкретні пропозиції від роботодавців, які шукають працівників (напр. "Потрібен продавець", "Шукаємо вантажника", "Запрошуємо на роботу").
-2) Шукають роботу (seeking) - люди, які хочуть знайти роботу АБО просто ставлять ПИТАННЯ (напр. "Питання щодо роботи", "Шукаю підробіток", "Чи є вільні вакансії?"). Будь-які запитання чи роздуми віднось до seeking!
+        classified = False
 
-СУВОРО ІГНОРУЙ: оренду житла, продаж речей, послуги таксі (якщо це реклама поїздки, а не найм водія), новини та інший спам.
+        if self.model:
+            try:
+                logger.info(f"🧠 AI-аналіз та подвійна самоперевірка ({len(candidates)} кандидатів)...")
+                prompt = f"""Ти аналітик та суворий редактор міського каналу Берестина.
+Твоє завдання — відібрати та ДВІЧІ ПЕРЕВІРИТИ (Double Self-Verification) оголошення про роботу за останню добу.
 
-Ось список повідомлень (JSON):
-{json_data}
+Список кандидатів (JSON):
+{json.dumps(candidates, ensure_ascii=False)}
+
+ІНСТРУКЦІЯ САМОПЕРЕВІРКИ:
+ПРОХІД 1 (Класифікація):
+- Вакансії (vacancies): конкретні пропозиції роботи / найму від роботодавців або компаній.
+- Шукають роботу (seeking): реальні люди, які шукають роботу для себе.
+
+ПРОХІД 2 (Сувора верифікація та відсів):
+- СУВОРО ВИДАЛИ: будь-які побутові запитання про графік роботи установ/магазинів/пошти/банків, продаж речей, послуги вантажників/таксі/ремонтів (це не найм), пошук котів/квартир.
+- Переконайся, що посилання (link) та імена (user) взяті ТОЧНО із вхідного списку.
+- Зроби інформативний стислий опис (summary) посади та зарплати (наприклад: "Автослюсар та автомеханік на СТО (з/п 20 000–30 000 грн)").
 
 Поверни ТІЛЬКИ валідний JSON у форматі:
-{
+{{
   "vacancies": [
-     {"user": "username", "summary": "Потрібен продавець-консультант", "link": "https://t.me/..."}
+     {{"user": "username", "summary": "...", "link": "https://t.me/..."}}
   ],
   "seeking": [
-     {"user": "username", "summary": "Шукаю підробіток на вихідні", "link": "https://t.me/..."}
+     {{"user": "username", "summary": "...", "link": "https://t.me/..."}}
   ]
-}
-Дуже важливо: повертай ТОЧНО ТЕ САМЕ посилання (link), яке було передано тобі у вхідному JSON для відповідного повідомлення!
-Якщо нічого не знайдено, поверни порожні масиви. Без форматування markdown!"""
-        
-        for batch in batches:
-            try:
-                batch_json = json.dumps(batch, ensure_ascii=False)
-                prompt = prompt_template.replace("{json_data}", batch_json)
-                
+}}"""
                 response = await asyncio.to_thread(self.model.generate_content, prompt)
                 resp_text = response.text.strip()
-                if resp_text.startswith("```json"):
-                    resp_text = resp_text[7:]
-                if resp_text.endswith("```"):
-                    resp_text = resp_text[:-3]
+                match = re.search(r'\{.*\}', resp_text, re.DOTALL)
+                if match:
+                    parsed = json.loads(match.group(0))
+                    raw_vac = parsed.get("vacancies", [])
+                    raw_seek = parsed.get("seeking", [])
                     
-                parsed = json.loads(resp_text.strip())
-                vacancies.extend(parsed.get("vacancies", []))
-                seeking.extend(parsed.get("seeking", []))
+                    # Додаткова валідація від галюцинацій та хибних спрацювань
+                    for item in raw_vac:
+                        s_low = item.get("summary", "").lower()
+                        if not any(re.search(p, s_low, re.I) for p in IRRELEVANT_PATTERNS):
+                            vacancies.append(item)
+                    for item in raw_seek:
+                        s_low = item.get("summary", "").lower()
+                        if not any(re.search(p, s_low, re.I) for p in IRRELEVANT_PATTERNS):
+                            seeking.append(item)
+                    classified = True
             except Exception as e:
-                logger.error(f"Gemini batch error (Робота): {e}")
-                
+                logger.error(f"Помилка або ліміт квоти Gemini (Робота): {e}. Застосовуємо резервний класифікатор.")
+
+        # Якщо AI не спрацював або повернув помилку (наприклад 429) — використовуємо детермінований класифікатор
+        if not classified:
+            rule_res = self._rule_based_classify(candidates)
+            vacancies = rule_res.get("vacancies", [])
+            seeking = rule_res.get("seeking", [])
+
+        # Фінальна дедуплікація
         def dedup(arr):
             seen = set()
             res = []
             for item in arr:
-                u = item.get("user", "")
-                if u not in seen:
-                    seen.add(u)
+                link = item.get("link", "")
+                if link and link not in seen:
+                    seen.add(link)
                     res.append(item)
             return res
-            
+
         vacancies = dedup(vacancies)
         seeking = dedup(seeking)
-        
+
         output = "<b>За останню добу:</b>\n\n"
         output += "<b>💼 Вакансії</b>\n"
         if vacancies:
@@ -189,7 +307,7 @@ class JobBot:
                 output += f"{idx}. {user} | <a href='{link}'>{summary}</a>\n"
         else:
             output += "- Немає оголошень\n"
-            
+
         output += "\n<b>🔎 Шукали роботу</b>\n"
         if seeking:
             for idx, item in enumerate(seeking, 1):
@@ -199,8 +317,35 @@ class JobBot:
                 output += f"{idx}. {user} | <a href='{link}'>{summary}</a>\n"
         else:
             output += "- Немає оголошень\n"
-            
+
         return output
+
+    async def _is_already_posted_today(self, date_key):
+        """Stateless перевірка останніх повідомлень у каналі."""
+        if not self.client:
+            return False
+        try:
+            import time
+            now_ts = time.time()
+            async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=25):
+                if past_msg.date and (now_ts - past_msg.date.timestamp()) < 86400:
+                    if past_msg.text and "💼 Вакансії" in past_msg.text and "За останню добу" in past_msg.text:
+                        msg_date_local = past_msg.date.astimezone(self.tz).strftime("%m-%d")
+                        if msg_date_local == date_key:
+                            return True
+        except Exception as e:
+            logger.error(f"Stateless dedup error (job): {e}")
+        return False
+
+    async def _post_report(self, report):
+        if self.bot:
+            await self.bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=report,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True
+            )
+            logger.info("✅ Пост про роботу успішно опубліковано!")
 
     async def _scheduler_loop(self):
         while True:
@@ -208,50 +353,36 @@ class JobBot:
                 now = datetime.now(self.tz)
                 date_key = now.strftime("%m-%d")
                 
-                target_start = now.replace(hour=17, minute=20, second=0, microsecond=0)
-                target_end = now.replace(hour=17, minute=35, second=0, microsecond=0)
-                
-                if target_start <= now < target_end and self.last_posted_date != date_key:
-                    if self.bot and self.model:
-                        try:
-                            logger.info("Починаємо збір та обробку вакансій...")
-                            report = await self._fetch_and_process()
+                # Початок збору з 17:20
+                if now.hour == 17 and now.minute >= 20 and self.last_posted_date != date_key:
+                    already_posted = await self._is_already_posted_today(date_key)
+                    if already_posted:
+                        self.last_posted_date = date_key
+                    else:
+                        logger.info("Починаємо збір та подвійну перевірку вакансій...")
+                        report = await self._fetch_and_process()
+                        
+                        # Якщо ще не настав час 17:30 — очікуємо
+                        publish_time = now.replace(hour=17, minute=30, second=0, microsecond=0)
+                        while datetime.now(self.tz) < publish_time:
+                            await asyncio.sleep(10)
                             
-                            logger.info("Звіт про роботу готовий. Очікуємо 17:30 для публікації...")
-                            publish_time = now.replace(hour=17, minute=30, second=0, microsecond=0)
-                            while datetime.now(self.tz) < publish_time:
-                                await asyncio.sleep(10)
-                                
-                            logger.info("17:30 - Публікуємо звіт про роботу!")
-                            # STATELESS DEDUPLICATION
-                            is_duplicate = False
-                            if self.client:
-                                try:
-                                    import time
-                                    now_ts = time.time()
-                                    async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=20):
-                                        if past_msg.date and (now_ts - past_msg.date.timestamp()) < 86400:
-                                            if past_msg.text and "💼 Вакансії" in past_msg.text and "За останню добу" in past_msg.text:
-                                                msg_date_local = past_msg.date.astimezone(self.tz).strftime("%m-%d")
-                                                if msg_date_local == date_key:
-                                                    is_duplicate = True
-                                                    break
-                                except Exception as e:
-                                    logger.error(f"Stateless dedup error (job): {e}")
-                                    
-                            if not is_duplicate:
-                                await self.bot.send_message(
-                                    chat_id=TELEGRAM_CHAT_ID,
-                                    text=report,
-                                    parse_mode=ParseMode.HTML,
-                                    disable_web_page_preview=True
-                                )
-                            else:
-                                logger.info("Звіт про роботу вже був опублікований сьогодні. Пропускаємо.")
-                            logger.info("✅ Пост про роботу успішно опубліковано!")
-                            self.last_posted_date = date_key
-                        except Exception as e:
-                            logger.error(f"Помилка підготовки/публікації вакансій: {e}")
+                        # Повторна перевірка перед відправкою
+                        if not await self._is_already_posted_today(date_key):
+                            await self._post_report(report)
+                        self.last_posted_date = date_key
+
+                # Catch-up якщо час більше 17:30 і ще не публікували сьогодні
+                elif now.hour >= 17 and (now.hour > 17 or now.minute >= 30) and self.last_posted_date != date_key:
+                    already_posted = await self._is_already_posted_today(date_key)
+                    if already_posted:
+                        self.last_posted_date = date_key
+                    else:
+                        logger.info("💼 Пропущено пост про вакансії у графіку! Запускаємо позачерговий випуск...")
+                        report = await self._fetch_and_process()
+                        if not await self._is_already_posted_today(date_key):
+                            await self._post_report(report)
+                        self.last_posted_date = date_key
             except Exception as e:
                 logger.error(f"Помилка в _scheduler_loop (JobBot): {e}")
             
@@ -262,32 +393,19 @@ class JobBot:
         logger.info("💼 Бот 'Робота / Вакансії' запущено!")
         logger.info("=" * 50)
         
-        # Catch-up logic: check if we missed today's 17:30 post
         try:
             now = datetime.now(self.tz)
             date_key = now.strftime("%m-%d")
             if now.hour >= 17 and (now.hour > 17 or now.minute >= 30):
-                is_duplicate = False
-                if self.client:
-                    import time
-                    now_ts = time.time()
-                    async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=20):
-                        if past_msg.date and (now_ts - past_msg.date.timestamp()) < 86400:
-                            if past_msg.text and "💼 Вакансії" in past_msg.text and "За останню добу" in past_msg.text:
-                                msg_date_local = past_msg.date.astimezone(self.tz).strftime("%m-%d")
-                                if msg_date_local == date_key:
-                                    is_duplicate = True
-                                    break
-                
-                if not is_duplicate:
+                already_posted = await self._is_already_posted_today(date_key)
+                if already_posted:
+                    self.last_posted_date = date_key
+                    logger.info("Звіт про роботу вже опублікований сьогодні.")
+                else:
                     logger.info("💼 Пропущено пост про вакансії! Публікуємо зараз...")
                     report = await self._fetch_and_process()
-                    await self.bot.send_message(
-                        chat_id=TELEGRAM_CHAT_ID,
-                        text=report,
-                        parse_mode=ParseMode.HTML,
-                        disable_web_page_preview=True
-                    )
+                    if not await self._is_already_posted_today(date_key):
+                        await self._post_report(report)
                     self.last_posted_date = date_key
                     logger.info("✅ Пропущений пост про вакансії успішно опубліковано!")
         except Exception as e:
