@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 import pytz
 
@@ -12,11 +13,37 @@ import google.generativeai as genai
 
 logger = logging.getLogger(__name__)
 
-RENT_BOT_TOKEN = os.environ.get("RENT_BOT_TOKEN", "8901603097:AAHcs2yGN-UPK675yy_3nzK-cEqj6J7iiqE") # Use DAWN token or same token if user didn't specify. Wait, user didn't provide a token for Rent bot. I'll use DAWN_BOT_TOKEN as a fallback or expect RENT_BOT_TOKEN.
+RENT_BOT_TOKEN = os.environ.get("RENT_BOT_TOKEN", "8901603097:AAHcs2yGN-UPK675yy_3nzK-cEqj6J7iiqE")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "-1001110859952")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 CHATS = ["krasnograd3serzem", "krasnogradbezp"]
+
+RENT_KEYWORDS = [
+    "аренд", "оренд", "сним", "знім", "сда", "зда", 
+    "квартир", "дом", "будин", "комнат", "кімнат", 
+    "житл", "жиль", "посуточн", "подобов", "поселен", "підселен"
+]
+
+IRRELEVANT_PATTERNS = [
+    r"гараж", r"бокс", r"склад", r"магазин", r"офіс", r"кабінет", r"приміщен",
+    r"прибирання", r"сиделк", r"ремонт.*технік", r"плитк", r"керамограніт",
+    r"світл", r"обстріл", r"перебої", r"шука[єе][мт]о?\s+(кота|кішку|собак)"
+]
+
+OFFERING_PATTERNS = [
+    r"здам\s+(в\s+оренду\s+)?([^\n\.,!]+)",
+    r"сдам\s+(в\s+аренду\s+)?([^\n\.,!]+)",
+    r"здається\s+([^\n\.,!]+)",
+    r"сдается\s+([^\n\.,!]+)",
+]
+
+SEEKING_PATTERNS = [
+    r"шука[юємо]+\s+(в\s+оренду\s+)?(квартир|будинок|кімнат|житл)",
+    r"знім[еу]+\s+(квартир|будинок|кімнат|житл)",
+    r"сниму\s+(квартир|будинок|комнат|жиль)",
+    r"шукаємо\s+квартиру",
+]
 
 class RentBot:
     def __init__(self, client: TelegramClient):
@@ -25,20 +52,93 @@ class RentBot:
         
         if GEMINI_API_KEY:
             genai.configure(api_key=GEMINI_API_KEY)
-            self.model = genai.GenerativeModel("gemini-flash-lite-latest")
+            self.model = genai.GenerativeModel("gemini-flash-latest")
         else:
             self.model = None
             
         self.tz = pytz.timezone('Europe/Kyiv')
         self.last_posted_date = None
 
+    def _rule_based_classify(self, messages):
+        """Резервний детермінований класифікатор оренди з повною валідацією."""
+        offering = []
+        seeking = []
+
+        for m in messages:
+            raw = m.get("text", "")
+            t = raw.lower()
+
+            if any(re.search(pat, t, re.I) for pat in IRRELEVANT_PATTERNS):
+                continue
+
+            has_offer_kw = any(w in t for w in ["здам", "сдам", "здається", "сдается", "здаю", "сдаю"])
+            has_seek_kw = any(w in t for w in ["шукаю", "шукаємо", "ищу", "зніму", "зніме", "сниму", "снимет"])
+            has_housing_kw = any(w in t for w in ["квартир", "будин", "дом", "кімнат", "комнат", "житл", "жиль"])
+
+            if not has_housing_kw:
+                continue
+
+            phone_match = re.search(r"(\+?380\d{9}|0\d{9})", raw)
+            phone_str = f" ({phone_match.group(0)})" if phone_match else ""
+
+            if has_offer_kw and not has_seek_kw:
+                summary = raw.split("\n")[0][:80].strip() + phone_str
+                offering.append({
+                    "user": m.get("user", "Невідомо"),
+                    "summary": summary,
+                    "link": m.get("link", "")
+                })
+            elif has_seek_kw:
+                desc = ""
+                if "двокімнатн" in t or "2-к" in t or "2-кімнатн" in t or "2 кімнатн" in t:
+                    desc = "2-кімнатна квартира"
+                elif "однокімнатн" in t or "1-к" in t or "1-кімнатн" in t or "1 кімнатн" in t:
+                    desc = "1-кімнатна квартира"
+                elif "будин" in t or "дом" in t:
+                    desc = "Будинок"
+                elif "кімнат" in t or "комнат" in t:
+                    desc = "Кімната"
+                elif "квартир" in t:
+                    desc = "Квартира"
+                else:
+                    desc = "Житло"
+
+                if "3 мкрн" in t or "мікрорайон" in t:
+                    desc += " (Берестин / 3 мкрн)"
+                elif "центр" in t:
+                    desc += " (центр)"
+
+                if "собачк" in t or "тварин" in t or "песик" in t:
+                    desc += " (з маленьким песиком)"
+                elif "сімʼя" in t or "сім\'я" in t or "семья" in t or "з чоловіком" in t:
+                    desc += " (для сім'ї)"
+
+                summary = f"{desc}{phone_str}"
+                seeking.append({
+                    "user": m.get("user", "Невідомо"),
+                    "summary": summary,
+                    "link": m.get("link", "")
+                })
+
+        def dedup(arr):
+            seen = set()
+            res = []
+            for it in arr:
+                link = it.get("link", "")
+                if link and link not in seen:
+                    seen.add(link)
+                    res.append(it)
+            return res
+
+        return {"offering": dedup(offering), "seeking": dedup(seeking)}
+
     async def _fetch_and_process(self):
-        """Збирає повідомлення, обробляє через Gemini і формує звіт."""
+        """Збирає повідомлення, обробляє через Gemini або резервний класифікатор і формує звіт."""
         now = datetime.now(self.tz)
         
-        # Від 20:00 попереднього дня до 19:50 поточного
-        end_time = now.replace(hour=16, minute=50, second=0, microsecond=0)
-        start_time = (end_time - timedelta(days=1)).replace(hour=17, minute=0)
+        # Вікно: від 17:00 попереднього дня до поточного часу
+        end_time = now
+        start_time = (end_time - timedelta(days=1)).replace(hour=17, minute=0, second=0, microsecond=0)
         
         logger.info(f"Збираємо оренду від {start_time} до {end_time}")
         
@@ -56,12 +156,10 @@ class RentBot:
                         continue
                         
                     text_lower = msg.raw_text.lower()
-                    RENT_KEYWORDS = [
-                        "аренд", "оренд", "сним", "знім", "сда", "зда", 
-                        "квартир", "дом", "будин", "комнат", "кімнат", 
-                        "житл", "жиль", "посуточн", "подобов", "поселен", "підселен"
-                    ]
                     if not any(k in text_lower for k in RENT_KEYWORDS):
+                        continue
+                        
+                    if any(re.search(p, text_lower, re.I) for p in IRRELEVANT_PATTERNS):
                         continue
                         
                     sender = await msg.get_sender()
@@ -76,71 +174,79 @@ class RentBot:
                                 
                     messages_data.append({
                         "user": username,
-                        "text": msg.raw_text[:300].replace('\n', ' '),
+                        "text": msg.raw_text[:350].replace('\n', ' '),
                         "link": f"https://t.me/{chat}/{msg.id}"
                     })
             except Exception as e:
                 logger.error(f"Помилка чату {chat} (Оренда): {e}")
                 
         if not messages_data:
-            return "За останню добу оголошень про оренду не знайдено."
+            return "<b>За останню добу:</b>\n\n<b>🏠 Здавали в оренду</b>\n- Немає оголошень\n\n<b>🔎 Шукали житло</b>\n- Немає оголошень"
             
-        batch_size = 50
-        batches = [messages_data[i:i + batch_size] for i in range(0, len(messages_data), batch_size)]
-        
         offering = []
         seeking = []
-        
-        prompt_template = """
-Ти помічник, який фільтрує повідомлення з місцевого чату про оренду житла.
-Твоя задача — розділити повідомлення на дві категорії:
-1) Здають житло (offering) - ТІЛЬКИ конкретні пропозиції від власників або ріелторів, які здають СВОЄ житло (напр. "Здам 2-к квартиру", "Здається будинок").
-2) Шукають житло (seeking) - люди, які хочуть зняти житло АБО просто ставлять ПИТАННЯ (напр. "Питання щодо здачі житла", "Шукаю квартиру", "Сім'я зніме"). Будь-які запитання чи роздуми віднось до seeking!
+        classified = False
 
-СУВОРО ІГНОРУЙ: комерційну нерухомість (магазини, склади, салони, кабінети), гаражі, продаж, послуги, таксі та інший спам.
+        if self.model:
+            try:
+                prompt = f"""Ти аналітик та редактор міського каналу Берестина.
+Твоє завдання — відібрати та ДВІЧІ ПЕРЕВІРИТИ (Double Self-Verification) повідомлення про ОРЕНДУ ЖИТЛА за останню добу.
 
-Ось список повідомлень (JSON):
-{json_data}
+Список повідомлень (JSON):
+{json.dumps(messages_data, ensure_ascii=False)}
+
+ІНСТРУКЦІЯ САМОПЕРЕВІРКИ:
+ПРОХІД 1 (Класифікація):
+- Здають житло (offering): конкретні пропозиції від орендодавців, які здають власне житло (квартири, будинки, кімнати).
+- Шукають житло (seeking): люди, які хочуть орендувати житло для себе.
+
+ПРОХІД 2 (Сувора фільтрація шуму):
+- СУВОРО ВИДАЛИ: гаражі, бокси, склади, офіси, магазини, комерційні приміщення, послуги прибирання/доглядальниці, новини, ремонт техніки, продаж.
+- Переконайся, що посилання (link) збережено ТОЧНО як у вхідних даних.
+- Зроби інформативний стислий опис (summary) типу житла та умов.
 
 Поверни ТІЛЬКИ валідний JSON у форматі:
-{
+{{
   "offering": [
-     {"user": "username", "summary": "короткий опис", "link": "https://t.me/..."}
+     {{"user": "username", "summary": "...", "link": "https://t.me/..."}}
   ],
   "seeking": [
-     {"user": "username", "summary": "короткий опис", "link": "https://t.me/..."}
+     {{"user": "username", "summary": "...", "link": "https://t.me/..."}}
   ]
-}
-Дуже важливо: повертай ТОЧНО ТЕ САМЕ посилання (link), яке було передано тобі у вхідному JSON для відповідного повідомлення!
-Якщо нічого не знайдено, поверни порожні масиви. Без форматування markdown!
-"""
-        
-        for batch in batches:
-            try:
-                batch_json = json.dumps(batch, ensure_ascii=False)
-                prompt = prompt_template.replace("{json_data}", batch_json)
-                
+}}"""
                 response = await asyncio.to_thread(self.model.generate_content, prompt)
                 resp_text = response.text.strip()
                 match = re.search(r'\{.*\}', resp_text, re.DOTALL)
                 if match:
                     parsed = json.loads(match.group(0))
-                else:
-                    parsed = json.loads(resp_text)
+                    raw_off = parsed.get("offering", [])
+                    raw_seek = parsed.get("seeking", [])
                     
-                offering.extend(parsed.get("offering", []))
-                seeking.extend(parsed.get("seeking", []))
+                    for item in raw_off:
+                        s_low = item.get("summary", "").lower()
+                        if not any(re.search(p, s_low, re.I) for p in IRRELEVANT_PATTERNS):
+                            offering.append(item)
+                    for item in raw_seek:
+                        s_low = item.get("summary", "").lower()
+                        if not any(re.search(p, s_low, re.I) for p in IRRELEVANT_PATTERNS):
+                            seeking.append(item)
+                    classified = True
             except Exception as e:
-                logger.error(f"Gemini batch error (Оренда): {e}")
-                
+                logger.error(f"Gemini error (Оренда): {e}. Застосовуємо резервний класифікатор.")
+
+        if not classified:
+            rule_res = self._rule_based_classify(messages_data)
+            offering = rule_res.get("offering", [])
+            seeking = rule_res.get("seeking", [])
+
         # Deduplicate
         def dedup(arr):
             seen = set()
             res = []
             for item in arr:
-                u = item.get("user", "")
-                if u not in seen:
-                    seen.add(u)
+                link = item.get("link", "")
+                if link and link not in seen:
+                    seen.add(link)
                     res.append(item)
             return res
             
@@ -183,6 +289,23 @@ class RentBot:
             except Exception as e:
                 logger.error(f"Помилка відправки в Telegram (RentBot): {e}")
 
+    async def _is_already_posted_today(self, date_key):
+        """Stateless перевірка останніх повідомлень у каналі."""
+        if not self.client:
+            return False
+        try:
+            import time
+            now_ts = time.time()
+            async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=25):
+                if past_msg.date and (now_ts - past_msg.date.timestamp()) < 86400:
+                    if past_msg.text and "Здавали в оренду" in past_msg.text and "За останню добу" in past_msg.text:
+                        msg_date_local = past_msg.date.astimezone(self.tz).strftime("%m-%d")
+                        if msg_date_local == date_key:
+                            return True
+        except Exception as e:
+            logger.error(f"Stateless dedup error (rent): {e}")
+        return False
+
     async def _scheduler_loop(self):
         """Фонова задача: старт збору о 16:50, публікація о 17:00."""
         while True:
@@ -190,49 +313,34 @@ class RentBot:
                 now = datetime.now(self.tz)
                 date_key = now.strftime("%m-%d")
                 
-                # Цільовий час початку: 16:50, кінець вікна 17:05
-                target_start = now.replace(hour=16, minute=50, second=0, microsecond=0)
-                target_end = now.replace(hour=17, minute=5, second=0, microsecond=0)
-                
-                if target_start <= now < target_end and self.last_posted_date != date_key:
-                    if self.bot and self.model:
-                        try:
-                            logger.info("Починаємо збір та обробку оренди...")
-                            report = await self._fetch_and_process()
+                # Старт о 16:50
+                if now.hour == 16 and now.minute >= 50 and self.last_posted_date != date_key:
+                    already_posted = await self._is_already_posted_today(date_key)
+                    if already_posted:
+                        self.last_posted_date = date_key
+                    else:
+                        logger.info("Починаємо збір та обробку оренди...")
+                        report = await self._fetch_and_process()
+                        
+                        publish_time = now.replace(hour=17, minute=0, second=0, microsecond=0)
+                        while datetime.now(self.tz) < publish_time:
+                            await asyncio.sleep(10)
                             
-                            logger.info("Звіт готовий. Очікуємо 17:00 для публікації...")
-                            publish_time = now.replace(hour=17, minute=0, second=0, microsecond=0)
-                            while datetime.now(self.tz) < publish_time:
-                                await asyncio.sleep(10)
-                                
-                            # STATELESS DEDUPLICATION
-                            is_duplicate = False
-                            if self.client:
-                                try:
-                                    import time
-                                    now_ts = time.time()
-                                    async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=20):
-                                        # If message is from today and contains 'Здавали в оренду'
-                                        if past_msg.date and (now_ts - past_msg.date.timestamp()) < 86400:
-                                            if past_msg.text and "Здавали в оренду" in past_msg.text and "За останню добу" in past_msg.text:
-                                                # Check if it was sent today (local time)
-                                                msg_date_local = past_msg.date.astimezone(self.tz).strftime("%m-%d")
-                                                if msg_date_local == date_key:
-                                                    is_duplicate = True
-                                                    break
-                                except Exception as e:
-                                    logger.error(f"Stateless dedup error (rent): {e}")
-                                    
-                            if not is_duplicate:
-                                await self._post_to_channel(report)
-                            else:
-                                logger.info("Звіт про оренду вже був опублікований сьогодні. Пропускаємо.")
-                            
-                            self.last_posted_date = date_key
-                            with open("history_rent.json", "w") as f:
-                                json.dump({"last_posted_date": date_key}, f)
-                        except Exception as e:
-                            logger.error(f"Помилка у розкладі RentBot: {e}")
+                        if not await self._is_already_posted_today(date_key):
+                            await self._post_to_channel(report)
+                        self.last_posted_date = date_key
+
+                # Catch-up якщо час більше 17:00 і ще не публікували сьогодні
+                elif now.hour >= 17 and self.last_posted_date != date_key:
+                    already_posted = await self._is_already_posted_today(date_key)
+                    if already_posted:
+                        self.last_posted_date = date_key
+                    else:
+                        logger.info("🏠 Пропущено пост про оренду у графіку! Запускаємо позачерговий випуск...")
+                        report = await self._fetch_and_process()
+                        if not await self._is_already_posted_today(date_key):
+                            await self._post_to_channel(report)
+                        self.last_posted_date = date_key
             except Exception as e:
                 logger.error(f"Помилка в _scheduler_loop (RentBot): {e}")
                         
@@ -244,27 +352,19 @@ class RentBot:
         logger.info("🏠 Бот 'Оренда житла' запущено!")
         logger.info("=" * 50)
         
-        # Catch-up logic: check if we missed today's 17:00 post
         try:
             now = datetime.now(self.tz)
             date_key = now.strftime("%m-%d")
             if now.hour >= 17:
-                is_duplicate = False
-                if self.client:
-                    import time
-                    now_ts = time.time()
-                    async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=20):
-                        if past_msg.date and (now_ts - past_msg.date.timestamp()) < 86400:
-                            if past_msg.text and "Здавали в оренду" in past_msg.text and "За останню добу" in past_msg.text:
-                                msg_date_local = past_msg.date.astimezone(self.tz).strftime("%m-%d")
-                                if msg_date_local == date_key:
-                                    is_duplicate = True
-                                    break
-                
-                if not is_duplicate:
+                already_posted = await self._is_already_posted_today(date_key)
+                if already_posted:
+                    self.last_posted_date = date_key
+                    logger.info("Звіт про оренду вже опублікований сьогодні.")
+                else:
                     logger.info("🏠 Пропущено пост про оренду! Публікуємо зараз...")
                     report = await self._fetch_and_process()
-                    await self._post_to_channel(report)
+                    if not await self._is_already_posted_today(date_key):
+                        await self._post_to_channel(report)
                     self.last_posted_date = date_key
                     logger.info("✅ Пропущений пост про оренду успішно опубліковано!")
         except Exception as e:
