@@ -13,7 +13,7 @@ import google.generativeai as genai
 
 logger = logging.getLogger(__name__)
 
-RENT_BOT_TOKEN = os.environ.get("RENT_BOT_TOKEN", "8901603097:AAHcs2yGN-UPK675yy_3nzK-cEqj6J7iiqE")
+RENT_BOT_TOKEN = os.environ.get("RENT_BOT_TOKEN", "8901603097:AAEJ894cMqFcYrd3L-SWzQOgsllcuYGU7t4")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "-1001110859952")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
