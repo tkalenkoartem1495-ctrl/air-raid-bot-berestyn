@@ -45,6 +45,43 @@ SEEKING_PATTERNS = [
     r"шукаємо\s+квартиру",
 ]
 
+def smart_dedup(arr):
+    seen_links = set()
+    seen_content = set()
+    res = []
+    for item in arr:
+        link = item.get("link", "")
+        user = item.get("user", "").lower().strip()
+        summary = item.get("summary", "").lower().strip()
+        
+        if link in seen_links:
+            continue
+            
+        phones = set(re.findall(r"(?:0|\+?380)\d{9}", summary))
+        norm_summary = re.sub(r"[^\w\s]", "", summary)
+        words = tuple(sorted(norm_summary.split()[:8]))
+        
+        is_dup = False
+        for s_user, s_words, s_phones in seen_content:
+            if user and user == s_user:
+                if phones and s_phones and (phones & s_phones):
+                    is_dup = True
+                    break
+                if words and s_words and len(set(words) & set(s_words)) >= min(len(words), len(s_words), 3):
+                    is_dup = True
+                    break
+            if words and words == s_words and len(words) >= 3:
+                is_dup = True
+                break
+                
+        if is_dup:
+            continue
+            
+        seen_links.add(link)
+        seen_content.add((user, words, frozenset(phones)))
+        res.append(item)
+    return res
+
 class RentBot:
     def __init__(self, client: TelegramClient):
         self.client = client
@@ -120,17 +157,7 @@ class RentBot:
                     "link": m.get("link", "")
                 })
 
-        def dedup(arr):
-            seen = set()
-            res = []
-            for it in arr:
-                link = it.get("link", "")
-                if link and link not in seen:
-                    seen.add(link)
-                    res.append(it)
-            return res
-
-        return {"offering": dedup(offering), "seeking": dedup(seeking)}
+        return {"offering": smart_dedup(offering), "seeking": smart_dedup(seeking)}
 
     async def _fetch_and_process(self):
         """Збирає повідомлення, обробляє через Gemini або резервний класифікатор і формує звіт."""
@@ -240,18 +267,8 @@ class RentBot:
             seeking = rule_res.get("seeking", [])
 
         # Deduplicate
-        def dedup(arr):
-            seen = set()
-            res = []
-            for item in arr:
-                link = item.get("link", "")
-                if link and link not in seen:
-                    seen.add(link)
-                    res.append(item)
-            return res
-            
-        offering = dedup(offering)
-        seeking = dedup(seeking)
+        offering = smart_dedup(offering)
+        seeking = smart_dedup(seeking)
         
         output = "<b>За останню добу:</b>\n\n"
         output += "<b>🏠 Здавали в оренду</b>\n"

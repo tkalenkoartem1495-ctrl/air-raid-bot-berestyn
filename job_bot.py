@@ -20,11 +20,11 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 CHATS = ["krasnograd3serzem", "krasnogradbezp"]
 
 JOB_KEYWORDS = [
-    "работ", "робот", "ваканс", "потріб", "требует", "підробіт", "подработ",
+    "работ", "робот", "ваканс", "потріб", "требует", "підробіт", "подработ", "подробот",
     "зарплат", "з/п", "зп", "офіціант", "продавец", "продавець", "вантажник",
     "водій", "водитель", "кухар", "повар", "бариста", "прибиральн", "уборщ",
     "автомийн", "автослюсар", "автомехан", "сезонну роботу", "найм", "працівник",
-    "шукаємо", "шукаю", "ищу"
+    "підсобн", "робітник", "співробітник", "шукаємо", "шукаю", "шукаем", "ищу", "ищем"
 ]
 
 IRRELEVANT_PATTERNS = [
@@ -44,24 +44,74 @@ IRRELEVANT_PATTERNS = [
     r"тариф\s+на\s+воду",
     r"послуги\s+вантажників",
     r"шукаю\s+коханця",
+    r"віддален(ий|а)\s+підробіт",
+    r"удаленн(ый|ая)\s+подработ",
+    r"30-40\s+хвилин\s+вашого\s+часу",
+    r"оплата\s+на\s+карту.*пиш[іи]ть\s+в\s+особист",
+    r"шукаю\s+помічник[іи]в\s+на\s+віддален",
 ]
 
 VACANCY_PATTERNS = [
-    r"потрібн[іиая]\s+([^\n\.,!]+)",
-    r"шукаємо\s+працівник[^\n\.,!]*",
+    r"потріб(ен|на|но|ні|ний|ного)\s+([^\n\.,!]+)",
+    r"требу[ею]тся\s+([^\n\.,!]+)",
+    r"шукаємо\s+(працівник|співробітник|людей|водій|кухар|авто|підсобн|робітник)[^\n\.,!]*",
     r"запрошуємо\s+(чоловіків|жінок|на\s+роботу|до\s+команди|працівник)",
     r"вакансія\s*:\s*([^\n\.,!]+)",
+    r"відкрито\s+вакансі[^\n\.,!]*",
     r"робота\s+на\s+([^\n\.,!]+)",
     r"робота\s+у\s+([^\n\.,!]+)",
     r"продавець-консульт[^\n\.,!]*",
     r"в\s+нашу\s+команду\s+потрібні",
+    r"в\s+автомагазин\s+потрібний",
+    r"на\s+сто\s+потрібні",
+    r"підсобн(ий|і)\s+робітник[^\n\.,!]*",
 ]
 
 SEEKING_PATTERNS = [
-    r"шукаю\s+(роботу|підробіток|вакансію)",
-    r"ищу\s+(работу|подработку|вакансию)",
-    r"шукаю\s+роботу\s+([^\n\.,!]+)",
+    r"(шука[юєе][ммо]*|ищ[уе][мм]?)\s+(підробіт|подработ|подробот|підробот|робот|работ|ваканс)[^\n\.,!]*",
+    r"підробіток\s+(на|для)\s+",
+    r"шука[юєе][ммо]*\s+підсобн",
+    r"ищ[уе][мм]?\s+подсобн",
+    r"резюме\s*:",
+    r"(готов[іиыйе]|мож[еу]м)\s+(працювати|робити|копати|прибирати)",
 ]
+
+def smart_dedup(arr):
+    seen_links = set()
+    seen_content = set()
+    res = []
+    for item in arr:
+        link = item.get("link", "")
+        user = item.get("user", "").lower().strip()
+        summary = item.get("summary", "").lower().strip()
+        
+        if link in seen_links:
+            continue
+            
+        phones = set(re.findall(r"(?:0|\+?380)\d{9}", summary))
+        norm_summary = re.sub(r"[^\w\s]", "", summary)
+        words = tuple(sorted(norm_summary.split()[:8]))
+        
+        is_dup = False
+        for s_user, s_words, s_phones in seen_content:
+            if user and user == s_user:
+                if phones and s_phones and (phones & s_phones):
+                    is_dup = True
+                    break
+                if words and s_words and len(set(words) & set(s_words)) >= min(len(words), len(s_words), 3):
+                    is_dup = True
+                    break
+            if words and words == s_words and len(words) >= 3:
+                is_dup = True
+                break
+                
+        if is_dup:
+            continue
+            
+        seen_links.add(link)
+        seen_content.add((user, words, frozenset(phones)))
+        res.append(item)
+    return res
 
 class JobBot:
     def __init__(self, client: TelegramClient):
@@ -90,7 +140,25 @@ class JobBot:
             if any(re.search(pat, t, re.I) for pat in IRRELEVANT_PATTERNS):
                 continue
 
-            # 2. Перевіряємо вакансії
+            # 2. Перевіряємо пошук роботи
+            is_seeking = any(re.search(pat, t, re.I) for pat in SEEKING_PATTERNS)
+            if is_seeking:
+                if 'два человека' in t or 'двох' in t:
+                    summary = 'Підробіток на двох людей'
+                elif '14 лет' in t or 'копать' in t:
+                    summary = 'Підробіток (копати, прибирати двори, рубати, допомога в будівництві)'
+                elif 'вантажник' in t:
+                    summary = 'Шукає роботу вантажником або підробіток'
+                else:
+                    summary = raw.split('\n')[0].strip()[:100]
+                seeking.append({
+                    "user": m.get("user", "Невідомо"),
+                    "summary": summary,
+                    "link": m.get("link", "")
+                })
+                continue
+
+            # 3. Перевіряємо вакансії
             is_vacancy = any(re.search(pat, t, re.I) for pat in VACANCY_PATTERNS)
             if is_vacancy:
                 if 'клін дім' in t:
@@ -99,41 +167,22 @@ class JobBot:
                     summary = 'Продавець-консультант (з/п 17 000–25 000 грн, графік 5/2)'
                 elif 'автослюсар' in t or 'автомехан' in t:
                     summary = 'Автослюсар та автомеханік на СТО (з/п 20 000–30 000 грн)'
+                elif 'підсобн' in t and ('автомагазин' in t or 'магазин' in t):
+                    summary = 'Підсобний робітник в автомагазин'
                 elif 'коблево' in t or 'виноградник' in t:
                     summary = 'Сезонна робота на виноградниках (Коблево, 1 000 грн/зміна)'
                 else:
-                    summary = raw[:100].replace('\n', ' ')
+                    summary = raw.split('\n')[0].strip()[:100]
 
                 vacancies.append({
                     "user": m.get("user", "Невідомо"),
                     "summary": summary,
                     "link": m.get("link", "")
                 })
-                continue
-
-            # 3. Перевіряємо пошук роботи
-            is_seeking = any(re.search(pat, t, re.I) for pat in SEEKING_PATTERNS)
-            if is_seeking:
-                seeking.append({
-                    "user": m.get("user", "Невідомо"),
-                    "summary": raw[:100].replace('\n', ' '),
-                    "link": m.get("link", "")
-                })
-
-        # Пасс 2: Дедуплікація за посиланням
-        def dedup(arr):
-            seen = set()
-            res = []
-            for item in arr:
-                link = item.get("link", "")
-                if link and link not in seen:
-                    seen.add(link)
-                    res.append(item)
-            return res
 
         return {
-            "vacancies": dedup(vacancies),
-            "seeking": dedup(seeking)
+            "vacancies": smart_dedup(vacancies),
+            "seeking": smart_dedup(seeking)
         }
 
     async def _fetch_and_process(self):
@@ -243,7 +292,8 @@ class JobBot:
 - Шукають роботу (seeking): реальні люди, які шукають роботу для себе.
 
 ПРОХІД 2 (Сувора верифікація та відсів):
-- СУВОРО ВИДАЛИ: будь-які побутові запитання про графік роботи установ/магазинів/пошти/банків, продаж речей, послуги вантажників/таксі/ремонтів (це не найм), пошук котів/квартир.
+- СУВОРО ЗАБОРОНЕНО ДУБЛІКАТИ: Якщо один і той самий автор опублікував однакове чи схоже оголошення декілька разів (навіть під різними посиланнями), ОБОВ'ЯЗКОВО залиш ТІЛЬКИ ОДНЕ (найсвіжіше)!
+- СУВОРО ВИДАЛИ: будь-які побутові запитання про графік роботи установ/магазинів/пошти/банків, продаж речей, послуги вантажників/таксі/ремонтів (це не найм), пошук котів/квартир, віддалений сумнівний заробіток/скам на картку.
 - Переконайся, що посилання (link) та імена (user) взяті ТОЧНО із вхідного списку.
 - Зроби інформативний стислий опис (summary) посади та зарплати (наприклад: "Автослюсар та автомеханік на СТО (з/п 20 000–30 000 грн)").
 
@@ -284,18 +334,8 @@ class JobBot:
             seeking = rule_res.get("seeking", [])
 
         # Фінальна дедуплікація
-        def dedup(arr):
-            seen = set()
-            res = []
-            for item in arr:
-                link = item.get("link", "")
-                if link and link not in seen:
-                    seen.add(link)
-                    res.append(item)
-            return res
-
-        vacancies = dedup(vacancies)
-        seeking = dedup(seeking)
+        vacancies = smart_dedup(vacancies)
+        seeking = smart_dedup(seeking)
 
         output = "<b>За останню добу:</b>\n\n"
         output += "<b>💼 Вакансії</b>\n"
