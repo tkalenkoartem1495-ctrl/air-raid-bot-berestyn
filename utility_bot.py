@@ -7,6 +7,7 @@
 """
 
 import asyncio
+from datetime import datetime, timezone, timedelta
 import logging
 import os
 import re
@@ -26,7 +27,34 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 MONITORED_CHATS = ["krasnogradbezp", "krasnograd3serzem"]
 MONITORED_CHAT_IDS = [-1003258624007, -1004456930190, 3258624007, 4456930190]
+ENERGY_CHANNEL = "kharkivenergy"
+ENERGY_CHANNEL_IDS = [-1002009071745, 2009071745]
+
 POLL_INTERVAL = int(os.environ.get("UTILITY_POLL_INTERVAL", os.environ.get("POLL_INTERVAL", "120")))
+
+
+def extract_energy_schedule(text: str) -> str | None:
+    """Витягує графік відключень для черги 1.1 (Берестин) з офіційних повідомлень Харківобленерго."""
+    if not text:
+        return None
+    pattern = r'(?:^|[^\d])1\.1\s*[:\-–—]?\s*(.*?)(?=(?:\s+[1-6]\.[12]\b|\s*Перелік|\s*ДЛЯ ПРОМИСЛОВОСТІ|\n\s*\n|$))'
+    m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return None
+    raw_val = m.group(1).strip()
+    raw_val = re.sub(r'[\s;,.]+$', '', raw_val).strip()
+    # Якщо немає вказаного часу або якщо зазначено, що не вимикається - ігноруємо
+    if not re.search(r'\d{1,2}:\d{2}', raw_val):
+        return None
+    if 'не вимикається' in raw_val.lower():
+        return None
+    return raw_val
+
+
+def format_energy_message(schedule_time: str) -> str:
+    """Форматує офіційне повідомлення про відключення світла для Берестина."""
+    return f"Згідно інформації Харківобленерго, у Берестині планується відключення світла: {schedule_time}"
+
 
 PROMPT = """Ти моніториш повідомлення мешканців щодо світла та води у місцевих чатах міста Берестин.
 Прочитай цей батч повідомлень. Твоє завдання — публікувати ТІЛЬКИ інформацію про фактичні відключення або ЗАПИТАННЯ щодо наявності послуг.
@@ -81,9 +109,85 @@ class UtilityMonitor:
         self.water_accumulated_locations = set()
         self.water_has_yellow = False
 
+        # Відстеження повідомлень Харківобленерго (дедуплікація та оновлення): {msg_id: {"sent_msg_id": int, "schedule": str, "timestamp": float}}
+        self.energy_posts = {}
+
         # Реєструємо обробник нових повідомлень
         self.client.on(events.NewMessage)(self._on_new_message)
         self.client.on(events.MessageEdited)(self._on_new_message)
+
+    async def _handle_energy_message(self, event_or_msg):
+        """Обробляє повідомлення з офіційного каналу Харківобленерго (@kharkivenergy)."""
+        text = getattr(event_or_msg, "raw_text", None) or getattr(event_or_msg, "text", "")
+        if not text:
+            return
+            
+        schedule = extract_energy_schedule(text)
+        msg_id = getattr(event_or_msg, "id", None)
+        
+        if not schedule:
+            logger.debug(f"⚡ [Харківобленерго] Повідомлення {msg_id} не містить відключення черги 1.1")
+            return
+            
+        outage_text = format_energy_message(schedule)
+        now_ts = time.time()
+        
+        # 1. Перевірка: чи цей пост уже оброблявся в пам'яті
+        existing = self.energy_posts.get(msg_id)
+        if existing:
+            if existing.get("schedule") == schedule:
+                logger.info(f"⚡ [Харківобленерго] Дублікат для {msg_id} (графік без змін: {schedule})")
+                return
+            else:
+                # Графік оновився в каналі Харківобленерго! Редагуємо повідомлення в каналі
+                target_chat_id = TELEGRAM_CHAT_ID or os.environ.get("TELEGRAM_CHAT_ID", "")
+                sent_msg_id = existing.get("sent_msg_id")
+                if sent_msg_id and self.light_bot and target_chat_id:
+                    try:
+                        await self.light_bot.edit_message_text(
+                            chat_id=target_chat_id,
+                            message_id=sent_msg_id,
+                            text=outage_text
+                        )
+                        existing["schedule"] = schedule
+                        existing["timestamp"] = now_ts
+                        logger.info(f"⚡ [Харківобленерго] Відредаговано повідомлення в каналі (пост {msg_id}): {outage_text}")
+                        return
+                    except Exception as e:
+                        logger.warning(f"Не вдалося відредагувати повідомлення {sent_msg_id}: {e}")
+        
+        # 2. Безстанова перевірка (Stateless Deduplication):
+        # Якщо бот перезапустився, перевіримо останні повідомлення в каналі
+        target_chat_id = TELEGRAM_CHAT_ID or os.environ.get("TELEGRAM_CHAT_ID", "")
+        try:
+            if target_chat_id:
+                async for past_msg in self.client.iter_messages(int(target_chat_id), limit=20):
+                    if past_msg.text and outage_text.strip() in past_msg.text.strip():
+                        logger.info(f"⚡ [Харківобленерго] Повідомлення вже є в каналі: {outage_text}")
+                        self.energy_posts[msg_id] = {
+                            "sent_msg_id": past_msg.id,
+                            "schedule": schedule,
+                            "timestamp": now_ts
+                        }
+                        return
+        except Exception as e:
+            logger.debug(f"Stateless dedup error (energy): {e}")
+            
+        # 3. Публікація нового повідомлення в цільовий канал
+        if self.light_bot and target_chat_id:
+            try:
+                sent = await self.light_bot.send_message(
+                    chat_id=target_chat_id,
+                    text=outage_text
+                )
+                self.energy_posts[msg_id] = {
+                    "sent_msg_id": getattr(sent, "message_id", None),
+                    "schedule": schedule,
+                    "timestamp": now_ts
+                }
+                logger.info(f"💡 [Харківобленерго] Опубліковано графік світла для Берестина: {outage_text}")
+            except Exception as e:
+                logger.error(f"Помилка відправки повідомлення Харківобленерго: {e}")
 
     def _format_status_message(self, clean_text: str) -> str:
         """Перетворює текст в список з булітами."""
@@ -104,7 +208,7 @@ class UtilityMonitor:
         return clean_text
 
     async def _on_new_message(self, event):
-        """Обробник нових повідомлень у комунальних чатах."""
+        """Обробник нових повідомлень у комунальних чатах та каналі Харківобленерго."""
         text = event.raw_text
         if not text:
             return
@@ -113,6 +217,18 @@ class UtilityMonitor:
         chat_username = getattr(chat, "username", "")
         chat_id = getattr(event, "chat_id", 0)
         
+        # 1. Перевірка на канал Харківобленерго
+        is_energy = False
+        if chat_username and chat_username.lower() == ENERGY_CHANNEL.lower():
+            is_energy = True
+        elif chat_id in ENERGY_CHANNEL_IDS:
+            is_energy = True
+            
+        if is_energy:
+            await self._handle_energy_message(event)
+            return
+
+        # 2. Перевірка на чати скарг мешканців
         is_monitored = False
         if chat_username and chat_username.lower() in [c.lower() for c in MONITORED_CHATS]:
             is_monitored = True
@@ -147,9 +263,20 @@ class UtilityMonitor:
         _STOP = {"Відключення", "Берестин", "Питання", "Наявності", "Мешканці", "Повідомляють", "Відсутність"}
         DEDUP_WINDOW = 1800  # 30 хвилин для дедуплікатора
 
+        energy_poll_counter = 0
         while True:
             await asyncio.sleep(POLL_INTERVAL)
             
+            # Періодичний фолбек-опит каналу Харківобленерго (кожні ~6 хв)
+            energy_poll_counter += 1
+            if energy_poll_counter >= 3:
+                energy_poll_counter = 0
+                try:
+                    msgs = await self.client.get_messages(ENERGY_CHANNEL, limit=3)
+                    for m in reversed(msgs):
+                        await self._handle_energy_message(m)
+                except Exception as pe:
+                    logger.debug(f"Energy periodic check: {pe}")
             
             now_ts = time.time()
             
@@ -349,11 +476,28 @@ class UtilityMonitor:
                 logger.error(f"Помилка обробки Gemini або відправки: {e}")
 
     async def start(self):
-        """Запускає фонову обробку батчів."""
+        """Запускає фонову обробку батчів та ініціалізує моніторинг каналу Харківобленерго."""
         logger.info("=" * 50)
         logger.info("💧/💡 Монітор комуналки (світло/вода) запущено!")
-        logger.info(f"📺 Канали: {', '.join('@' + c for c in MONITORED_CHATS)}")
+        logger.info(f"📺 Чати мешканців: {', '.join('@' + c for c in MONITORED_CHATS)}")
+        logger.info(f"⚡ Офіційний канал енерго: @{ENERGY_CHANNEL}")
         logger.info("=" * 50)
         
+        # Підписка та підтягування свіжих повідомлень Харківобленерго за останні 24 години
+        try:
+            from telethon.tl.functions.channels import JoinChannelRequest
+            try:
+                await self.client(JoinChannelRequest(ENERGY_CHANNEL))
+            except Exception:
+                pass
+                
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+            msgs = await self.client.get_messages(ENERGY_CHANNEL, limit=10)
+            for m in reversed(msgs):
+                if m and m.date and m.date >= cutoff:
+                    await self._handle_energy_message(m)
+        except Exception as e:
+            logger.warning(f"Catch-up для @{ENERGY_CHANNEL}: {e}")
+
         # Запускаємо безкінечний цикл батчингу як фонову таску
         asyncio.create_task(self._process_batch_loop())
