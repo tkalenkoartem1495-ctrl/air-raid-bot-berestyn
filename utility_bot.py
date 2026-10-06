@@ -48,6 +48,8 @@ def extract_energy_schedule(text: str) -> str | None:
         return None
     if 'не вимикається' in raw_val.lower():
         return None
+    # Нормалізуємо час: розділювач годин записуємо через дефіс/тире з пробілами (наприклад: 19:00 – 22:30)
+    raw_val = re.sub(r'(\b\d{1,2}:\d{2})\s*[:\-–—]\s*(\d{1,2}:\d{2}\b)', r'\1 – \2', raw_val)
     return raw_val
 
 
