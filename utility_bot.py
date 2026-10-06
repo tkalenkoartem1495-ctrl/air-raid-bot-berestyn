@@ -59,30 +59,34 @@ def format_energy_message(schedule_time: str) -> str:
 
 
 PROMPT = """Ти моніториш повідомлення мешканців щодо світла та води у місцевих чатах міста Берестин.
-Прочитай цей батч повідомлень. Твоє завдання — публікувати ТІЛЬКИ інформацію про фактичні відключення або ЗАПИТАННЯ щодо наявності послуг.
+Твоє завдання — на основі НОВИХ повідомлень та КОНТЕКСТУ попередніх повідомлень за поточний день визначати ФАКТИЧНІ зміни у подачі світла та води.
 
-МІСЦЕВА КОНВЕНЦІЯ (ДУЖЕ ВАЖЛИВО!):
-Мешканці часто пишуть дуже коротко: "<назва вулиці/мікрорайону> <знак>".
-- Знак "-" або "нема" або "відключили" = ВІДКЛЮЧЕННЯ (немає світла/води).
-- Знак "+" або "дали" або "є" = ВІДНОВЛЕННЯ (послугу дали, це НЕ треба публікувати).
-Приклади скарг на відключення: "Піщанка -", "Высокое -", "Центр нема", "Мікрорайон відключили"
-Приклади відновлення (ігноруй): "Піщанка +", "Высокое+", "Центр дали", "Є!"
+ДЛЯ СВІТЛА ДОЗВОЛЕНО ТІЛЬКИ ДВА СТАТУСИ:
+1. 🔴 ЧЕРВОНИЙ СТАТУС (відключення) — коли мешканці стверджують або підтверджують, що світла НЕМАЄ ("-", "нема", "відключили", "зникло", "вимкнули").
+   Формат: [LIGHT_OFF] 🔴 Відключення світла: {локація}
+2. 🟢 ЗЕЛЕНИЙ СТАТУС (відновлення) — коли мешканці повідомляють, що світло ДАЛИ або воно З'ЯВИЛОСЯ ("+", "дали", "є світло", "з'явилось", "увімкнули").
+   Формат: [LIGHT_ON] 🟢 Відновлення світла: {локація}
+
+КАТЕГОРИЧНО ЗАБОРОНЕНО ДЛЯ СВІТЛА:
+- ЖОДНИХ ЖОВТИХ СТАТУСІВ (🟡) ДЛЯ СВІТЛА! Заборонено писати "Питання щодо наявності світла".
+- Якщо люди лише запитують ("чи є світло?", "у кого є світло?", "як там на Піщанці?") і немає чіткої відповіді про відключення чи відновлення — ЦЕ НЕ ПУБЛІКУЄТЬСЯ. Питання слугують виключно контекстом для розуміння наступних відповідей мешканців!
+- Якщо немає чіткого факту відключення або відновлення — повертай NONE.
+
+ДЛЯ ВОДИ:
+- [WATER_OFF] 🔵 Відключення води: {локація}
+- [WATER_QUESTION] 🟡 Питання щодо наявності води: {локація}
 
 ПРАВИЛА:
 1. ВІДПОВІДАЙ ВИКЛЮЧНО УКРАЇНСЬКОЮ МОВОЮ (навіть якщо оригінали російською).
-2. Завжди використовуй назву міста Берестин (замість Красноград). Назви районів перекладай: "Высокое" → "Високе", "Песчаная/Піщана/Piщанка" → "Піщанка". ВАЖЛИВО: Піщанка — це не мікрорайон і не вулиця, пиши просто "Піщанка".
-3. ІГНОРУЙ загальні обговорення, графіки на майбутнє, рекламу, оголошення.
-4. ІГНОРУЙ повідомлення про відновлення послуги (знак "+", слова "дали", "є", "з'явилось").
-5. Якщо люди СТВЕРДЖУЮТЬ про відсутність (знак "-", "нема", "відключили", "зникло") — це ФАКТИЧНЕ відключення. Використовуй 🔴 (світло) або 🔵 (вода): "Відключення...".
-6. Якщо люди лише ПИТАЮТЬ ("є світло?", "що з водою?") — НЕВИЗНАЧЕНІСТЬ. Використовуй 🟡: "Питання щодо наявності...". НЕ ПИШИ "Відключення" для питань.
-7. Якщо є кілька схожих повідомлень — узагальнюй їх в одне.
-8. Якщо нічого релевантного немає — поверни слово NONE.
-9. ВАЖЛИВО: назвою вулиці/мікрорайону може бути ТІЛЬКИ реальна географічна назва (Шевченко, Піщанка, Короленко, Центр, тощо). НЕ вважай звичайні слова назвами районів: "погода", "дирка", "капут", "все", "нема", "відсутність" — це НЕ назви місць. Якщо в повідомленні немає конкретної адреси/вулиці — просто пиши "Берестин" без вигадування назви.
+2. Завжди використовуй назву міста Берестин (замість Красноград). Назви районів перекладай: "Высокое" → "Високе", "Піщанка" (пиши просто "Піщанка").
+3. Обов'язково враховуй контекст діалогів за поточний день: якщо раніше в контексті питали про конкретну вулицю чи район (наприклад "Як там на Копиленка?"), а в новому повідомленні відповіли "+" або "нема", застосовуй локацію з контексту питання.
+4. Назвою вулиці/району може бути ТІЛЬКИ реальна географічна назва (Шевченко, Піщанка, Короленко, Центр, 3 мікрорайон тощо). Якщо конкретної вулиці/району не названо — пиши просто "Берестин".
+5. Якщо в нових повідомленнях немає інформації про фактичне відключення або відновлення — повертай NONE.
 
 Приклади ідеальної відповіді:
-[LIGHT] 🔴 Відключення світла: мікрорайон Високе, Піщанка (мешканці повідомляють про відсутність світла).
-[LIGHT] 🟡 Питання щодо наявності світла: район Центр (мешканці питають про наявність).
-[WATER] 🔵 Відключення води: мікрорайон Центральний.
+[LIGHT_OFF] 🔴 Відключення світла: мікрорайон Високе, Піщанка
+[LIGHT_ON] 🟢 Відновлення світла: Центр, 3 мікрорайон
+[WATER_OFF] 🔵 Відключення води: мікрорайон Центральний
 """
 
 
@@ -113,6 +117,9 @@ class UtilityMonitor:
 
         # Відстеження повідомлень Харківобленерго (дедуплікація та оновлення): {msg_id: {"sent_msg_id": int, "schedule": str, "timestamp": float}}
         self.energy_posts = {}
+
+        # Контекст повідомлень у чатах за поточний день: [{"date": datetime, "chat": str, "text": str}]
+        self.daily_context = []
 
         # Реєструємо обробник нових повідомлень
         self.client.on(events.NewMessage)(self._on_new_message)
@@ -193,7 +200,7 @@ class UtilityMonitor:
 
     def _format_status_message(self, clean_text: str) -> str:
         """Перетворює текст в список з булітами."""
-        match = re.match(r"(🔴 Відключення світла:|🔵 Відключення води:|🟡 Питання щодо наявності світла:|🟡 Питання щодо наявності води:)\s*(.*)", clean_text)
+        match = re.match(r"(🔴 Відключення світла:|🟢 Відновлення світла:|🔵 Відключення води:|🟡 Питання щодо наявності світла:|🟡 Питання щодо наявності води:)\s*(.*)", clean_text)
         if match:
             header = match.group(1)
             rest = match.group(2)
@@ -241,6 +248,21 @@ class UtilityMonitor:
             return
 
         chat_title = getattr(chat, "title", "Чат")
+        msg_date = getattr(event, "date", None) or datetime.now(timezone.utc)
+        today_date = datetime.now(timezone.utc).date()
+
+        # Зберігаємо контекст повідомлень за поточний день (до 100 повідомлень)
+        self.daily_context = [
+            m for m in self.daily_context 
+            if m.get("date") and m["date"].date() == today_date
+        ]
+        self.daily_context.append({
+            "date": msg_date,
+            "chat": chat_title,
+            "text": text[:300]
+        })
+        if len(self.daily_context) > 100:
+            self.daily_context = self.daily_context[-100:]
 
         logger.info(f"💧/💡 Знайдено нове повідомлення в {chat_title}: {text[:50]}...")
         
@@ -339,12 +361,23 @@ class UtilityMonitor:
                 logger.error("GEMINI_API_KEY не задано! Пропускаю батч.")
                 continue
 
-            dynamic_prompt = PROMPT + "\n\nДИНАМІЧНІ ПРАВИЛА (ВАЖЛИВО!):\n"
-            dynamic_prompt += "- Якщо є скарги або питання про світло, створи ОДНЕ зведене повідомлення і почни його з тегу [LIGHT].\n"
-            dynamic_prompt += "- Якщо є скарги або питання про воду, створи ОДНЕ зведене повідомлення і почни його з тегу [WATER].\n"
+            # Формуємо блок контексту за поточний день
+            recent_context_lines = []
+            for item in self.daily_context[-35:]:
+                time_str = item["date"].strftime("%H:%M") if item.get("date") else ""
+                recent_context_lines.append(f"[{time_str}] [{item['chat']}] {item['text']}")
+            
+            context_block = "\n".join(recent_context_lines) if recent_context_lines else "Немає попередніх повідомлень."
 
             batch_text = "\n---\n".join(messages_to_process)
-            full_prompt = f"{dynamic_prompt}\n\nПовідомлення:\n{batch_text}"
+            full_prompt = f"""{PROMPT}
+
+КОНТЕКСТ ДІАЛОГІВ У ЧАТАХ ЗА ПОТОЧНИЙ ДЕНЬ:
+{context_block}
+
+НОВІ ПОВІДОМЛЕННЯ ДЛЯ АНАЛІЗУ:
+{batch_text}
+"""
 
             try:
                 response = await asyncio.to_thread(self.model.generate_content, full_prompt)
@@ -359,37 +392,48 @@ class UtilityMonitor:
                     if not line:
                         continue
                         
-                    if "[LIGHT]" in line and self.light_bot:
-                        clean_text = line.replace("[LIGHT]", "").strip()
+                    if ("[LIGHT" in line or "Відключення світла" in line or "Відновлення світла" in line) and self.light_bot:
+                        # Категорична заборона жовтих статусів (питань) для світла
+                        if "🟡" in line or "Питання щодо наявності" in line:
+                            logger.info("💡 Жовтий статус світла (питання) відхилено. Бот публікує лише 🔴 та 🟢.")
+                            continue
+                            
+                        is_green = "🟢" in line or "[LIGHT_ON]" in line or "Відновлення світла" in line
+                        is_red = "🔴" in line or "[LIGHT_OFF]" in line or "Відключення світла" in line
+                        
+                        if not is_green and not is_red:
+                            continue
+                            
+                        clean_text = line.replace("[LIGHT_OFF]", "").replace("[LIGHT_ON]", "").replace("[LIGHT]", "").strip()
                         clean_text = self._replace_city_name(clean_text)
                         
                         # Витягуємо назви районів/вулиць (виключаємо шаблонні слова)
                         new_locations = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', clean_text)) - _STOP
+                        actual_locs = new_locations if new_locations else {"Берестин"}
                         
-                        is_yellow = "🟡" in clean_text or "Питання щодо наявності" in clean_text
+                        target_chat_id = TELEGRAM_CHAT_ID or os.environ.get("TELEGRAM_CHAT_ID", "")
                         
                         # STATELESS DEDUPLICATION (вікно 30 хв)
                         is_duplicate = False
                         try:
                             now_ts = time.time()
-                            # Шукаємо найсвіжіший наш пост про світло у каналі
-                            async for past_msg in self.client.iter_messages(int(TELEGRAM_CHAT_ID), limit=10):
-                                if past_msg.date and (now_ts - past_msg.date.timestamp()) < DEDUP_WINDOW:
-                                    if not past_msg.text:
-                                        continue
-                                        
-                                    # Якщо це ЖОВТИЙ СТАТУС (питання): перевіряємо, чи були будь-які питання за останні 30 хв
-                                    if is_yellow and "Питання щодо наявності світла" in past_msg.text:
-                                        is_duplicate = True
-                                        logger.info("💡 Жовтий статус на кулдауні (вже питали про світло за останні 30 хв).")
-                                        break
-                                        
-                                    # Якщо це ЧЕРВОНИЙ СТАТУС (відключення): порівнюємо по адресах тільки з червоними постами
-                                    elif not is_yellow and "Відключення світла" in past_msg.text:
-                                        past_locs = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', past_msg.text)) - _STOP
-                                        if new_locations and new_locations.issubset(past_locs):
-                                            is_duplicate = True
-                                        break
+                            if target_chat_id:
+                                async for past_msg in self.client.iter_messages(int(target_chat_id), limit=15):
+                                    if past_msg.date and (now_ts - past_msg.date.timestamp()) < DEDUP_WINDOW:
+                                        if not past_msg.text:
+                                            continue
+                                        if is_green and "Відновлення світла" in past_msg.text:
+                                            past_locs = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', past_msg.text)) - _STOP
+                                            if new_locations and new_locations.issubset(past_locs):
+                                                is_duplicate = True
+                                                logger.info(f"💡 Дублікат відновлення світла ({actual_locs}). Пропускаємо.")
+                                                break
+                                        elif is_red and "Відключення світла" in past_msg.text:
+                                            past_locs = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', past_msg.text)) - _STOP
+                                            if new_locations and new_locations.issubset(past_locs):
+                                                is_duplicate = True
+                                                logger.info(f"💡 Дублікат відключення світла ({actual_locs}). Пропускаємо.")
+                                                break
                         except Exception as e:
                             logger.error(f"Stateless dedup error (light): {e}")
                             
@@ -397,10 +441,19 @@ class UtilityMonitor:
                             formatted_text = self._format_status_message(clean_text)
                             now_ts = time.time()
                             
-                            if not is_yellow:
-                                actual_locs = new_locations if new_locations else {"Берестин"}
+                            if is_green:
+                                # Зелений статус публікуємо одразу
+                                try:
+                                    await self.light_bot.send_message(
+                                        chat_id=target_chat_id,
+                                        text=formatted_text
+                                    )
+                                    logger.info(f"💡 🟢 Відправлено статус відновлення світла: {formatted_text}")
+                                except Exception as e:
+                                    logger.error(f"Light green send error: {e}")
+                            else:
+                                # Червоний статус (відключення) зі спам-контролем
                                 is_accumulating = now_ts < self.light_accumulating_until
-                                
                                 if is_accumulating:
                                     self.light_accumulated_locations.update(actual_locs)
                                     logger.info(f"💡 📦 Режим збору. Додано до пачки: {actual_locs}")
@@ -416,24 +469,14 @@ class UtilityMonitor:
                                     else:
                                         try:
                                             await self.light_bot.send_message(
-                                                chat_id=TELEGRAM_CHAT_ID,
+                                                chat_id=target_chat_id,
                                                 text=formatted_text
                                             )
-                                            logger.info(f"💡 Відправлено статус світла: {formatted_text}")
+                                            logger.info(f"💡 🔴 Відправлено статус відключення світла: {formatted_text}")
                                         except Exception as e:
-                                            logger.error(f"Light send error: {e}")
-                            else:
-                                # Жовті повідомлення просто публікуємо відформатованими
-                                try:
-                                    await self.light_bot.send_message(
-                                        chat_id=TELEGRAM_CHAT_ID,
-                                        text=formatted_text
-                                    )
-                                    logger.info(f"💡 Відправлено статус світла: {formatted_text}")
-                                except Exception as e:
-                                    logger.error(f"Light yellow send error: {e}")
+                                            logger.error(f"Light red send error: {e}")
                         else:
-                            logger.info("💡 Дублікат (ті самі адреси за 30 хв). Пропускаємо.")
+                            logger.info("💡 Дублікат статусу світла. Пропускаємо.")
                         
                     elif "[WATER]" in line and self.water_bot:
                         clean_text = line.replace("[WATER]", "").strip()
@@ -500,6 +543,25 @@ class UtilityMonitor:
                     await self._handle_energy_message(m)
         except Exception as e:
             logger.warning(f"Catch-up для @{ENERGY_CHANNEL}: {e}")
+
+        # Підтягуємо повідомлення за сьогодні з моніторених чатів для контексту дня
+        try:
+            today_date = datetime.now(timezone.utc).date()
+            for chat_ref in MONITORED_CHATS:
+                try:
+                    async for past_m in self.client.iter_messages(chat_ref, limit=35):
+                        if past_m.date and past_m.date.date() == today_date and past_m.raw_text:
+                            self.daily_context.append({
+                                "date": past_m.date,
+                                "chat": chat_ref,
+                                "text": past_m.raw_text[:300]
+                            })
+                except Exception as ce:
+                    logger.debug(f"Контекст дня для {chat_ref}: {ce}")
+            self.daily_context.sort(key=lambda x: x["date"])
+            logger.info(f"💡 Завантажено {len(self.daily_context)} повідомлень у контекст поточного дня.")
+        except Exception as de:
+            logger.debug(f"Daily context catchup error: {de}")
 
         # Запускаємо безкінечний цикл батчингу як фонову таску
         asyncio.create_task(self._process_batch_loop())
