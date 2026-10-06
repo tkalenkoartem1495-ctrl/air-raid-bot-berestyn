@@ -32,6 +32,38 @@ ENERGY_CHANNEL_IDS = [-1002009071745, 2009071745]
 
 POLL_INTERVAL = int(os.environ.get("UTILITY_POLL_INTERVAL", os.environ.get("POLL_INTERVAL", "120")))
 
+try:
+    import pytz
+    KYIV_TZ = pytz.timezone("Europe/Kyiv")
+except Exception:
+    import zoneinfo
+    KYIV_TZ = zoneinfo.ZoneInfo("Europe/Kyiv")
+
+
+def to_kyiv_datetime(dt: datetime) -> datetime:
+    """Перетворює datetime у київський часовий пояс."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(KYIV_TZ)
+
+
+def get_context_cutoff_date(dt_kyiv: datetime | None = None):
+    """Визначає граничну дату для зберігання контексту повідомлень за київським часом:
+    - Контекст сьогодні формується з 00:00 (12 ночі).
+    - Контекст вчора зберігається завжди.
+    - До 03:30 ранку зберігається також контекст позавчорашнього дня.
+    - О 03:30 ранку (десь о 3-4 ранку) контекст позавчорашнього дня видаляється,
+      залишається вчорашній та сьогоднішній, що почав формуватись з 12 ночі.
+    """
+    if dt_kyiv is None:
+        dt_kyiv = datetime.now(KYIV_TZ)
+    today = dt_kyiv.date()
+    # До 03:30 ранку залишається позавчорашній день (сьогодні - 2 дні)
+    if dt_kyiv.hour < 3 or (dt_kyiv.hour == 3 and dt_kyiv.minute < 30):
+        return today - timedelta(days=2)
+    # З 03:30 ранку контекст позавчора видаляється, залишається вчора (сьогодні - 1 день) і сьогодні
+    return today - timedelta(days=1)
+
 
 def extract_energy_schedule(text: str) -> str | None:
     """Витягує графік відключень для черги 1.1 (Берестин) з офіційних повідомлень Харківобленерго."""
@@ -59,7 +91,7 @@ def format_energy_message(schedule_time: str) -> str:
 
 
 PROMPT = """Ти моніториш повідомлення мешканців щодо світла та води у місцевих чатах міста Берестин.
-Твоє завдання — на основі НОВИХ повідомлень та КОНТЕКСТУ попередніх повідомлень за поточний день визначати ФАКТИЧНІ зміни у подачі світла та води.
+Твоє завдання — на основі НОВИХ повідомлень та КОНТЕКСТУ попередніх повідомлень (сьогодні та вчора) визначати ФАКТИЧНІ зміни у подачі світла та води.
 
 ДЛЯ СВІТЛА ДОЗВОЛЕНО ТІЛЬКИ ДВА СТАТУСИ:
 1. 🔴 ЧЕРВОНИЙ СТАТУС (відключення) — коли мешканці стверджують або підтверджують, що світла НЕМАЄ ("-", "нема", "відключили", "зникло", "вимкнули").
@@ -79,7 +111,7 @@ PROMPT = """Ти моніториш повідомлення мешканців 
 ПРАВИЛА:
 1. ВІДПОВІДАЙ ВИКЛЮЧНО УКРАЇНСЬКОЮ МОВОЮ (навіть якщо оригінали російською).
 2. Завжди використовуй назву міста Берестин (замість Красноград). Назви районів перекладай: "Высокое" → "Високе", "Піщанка" (пиши просто "Піщанка").
-3. Обов'язково враховуй контекст діалогів за поточний день: якщо раніше в контексті питали про конкретну вулицю чи район (наприклад "Як там на Копиленка?"), а в новому повідомленні відповіли "+" або "нема", застосовуй локацію з контексту питання.
+3. Обов'язково враховуй контекст діалогів: якщо раніше в контексті питали про конкретну вулицю чи район (наприклад "Як там на Копиленка?"), а в новому повідомленні відповіли "+" або "нема", застосовуй локацію з контексту питання.
 4. Назвою вулиці/району може бути ТІЛЬКИ реальна географічна назва (Шевченко, Піщанка, Короленко, Центр, 3 мікрорайон тощо). Якщо конкретної вулиці/району не названо — пиши просто "Берестин".
 5. Якщо в нових повідомленнях немає інформації про фактичне відключення або відновлення — повертай NONE.
 
@@ -118,12 +150,34 @@ class UtilityMonitor:
         # Відстеження повідомлень Харківобленерго (дедуплікація та оновлення): {msg_id: {"sent_msg_id": int, "schedule": str, "timestamp": float}}
         self.energy_posts = {}
 
-        # Контекст повідомлень у чатах за поточний день: [{"date": datetime, "chat": str, "text": str}]
+        # Контекст повідомлень у чатах: [{"date": datetime, "chat": str, "text": str}]
         self.daily_context = []
 
         # Реєструємо обробник нових повідомлень
         self.client.on(events.NewMessage)(self._on_new_message)
         self.client.on(events.MessageEdited)(self._on_new_message)
+
+    def _prune_context(self, now_kyiv: datetime | None = None):
+        """Очищає контекст минулих днів за київським часом:
+        - До 03:30 ранку зберігається контекст позавчора, вчора та сьогодні.
+        - З 03:30 ранку (3-4 ранку) контекст позавчорашнього дня видаляється,
+          залишається вчорашній та сьогоднішній (що почав формуватись з 12 ночі).
+        - Для економії ресурсів обмежує список до 250 найактуальніших записів.
+        """
+        cutoff_date = get_context_cutoff_date(now_kyiv)
+        initial_len = len(self.daily_context)
+        
+        self.daily_context = [
+            m for m in self.daily_context
+            if m.get("date") and to_kyiv_datetime(m["date"]).date() >= cutoff_date
+        ]
+        
+        if len(self.daily_context) > 250:
+            self.daily_context = self.daily_context[-250:]
+            
+        pruned = initial_len - len(self.daily_context)
+        if pruned > 0:
+            logger.info(f"🧹 Очищено контекст: видалено {pruned} старих повідомлень (до дати {cutoff_date}). Залишилось: {len(self.daily_context)}.")
 
     async def _handle_energy_message(self, event_or_msg):
         """Обробляє повідомлення з офіційного каналу Харківобленерго (@kharkivenergy)."""
@@ -249,20 +303,14 @@ class UtilityMonitor:
 
         chat_title = getattr(chat, "title", "Чат")
         msg_date = getattr(event, "date", None) or datetime.now(timezone.utc)
-        today_date = datetime.now(timezone.utc).date()
 
-        # Зберігаємо контекст повідомлень за поточний день (до 100 повідомлень)
-        self.daily_context = [
-            m for m in self.daily_context 
-            if m.get("date") and m["date"].date() == today_date
-        ]
+        # Додаємо повідомлення та проводимо очищення контексту за київським часом
         self.daily_context.append({
             "date": msg_date,
             "chat": chat_title,
             "text": text[:300]
         })
-        if len(self.daily_context) > 100:
-            self.daily_context = self.daily_context[-100:]
+        self._prune_context()
 
         logger.info(f"💧/💡 Знайдено нове повідомлення в {chat_title}: {text[:50]}...")
         
@@ -290,6 +338,9 @@ class UtilityMonitor:
         energy_poll_counter = 0
         while True:
             await asyncio.sleep(POLL_INTERVAL)
+            
+            # Періодичне очищення контексту минулих днів
+            self._prune_context()
             
             # Періодичний фолбек-опит каналу Харківобленерго (кожні ~6 хв)
             energy_poll_counter += 1
@@ -361,10 +412,11 @@ class UtilityMonitor:
                 logger.error("GEMINI_API_KEY не задано! Пропускаю батч.")
                 continue
 
-            # Формуємо блок контексту за поточний день
+            # Формуємо блок контексту (вчора та сьогодні за Києвом)
             recent_context_lines = []
-            for item in self.daily_context[-35:]:
-                time_str = item["date"].strftime("%H:%M") if item.get("date") else ""
+            for item in self.daily_context[-40:]:
+                kyiv_dt = to_kyiv_datetime(item["date"]) if item.get("date") else None
+                time_str = kyiv_dt.strftime("%d.%m %H:%M") if kyiv_dt else ""
                 recent_context_lines.append(f"[{time_str}] [{item['chat']}] {item['text']}")
             
             context_block = "\n".join(recent_context_lines) if recent_context_lines else "Немає попередніх повідомлень."
@@ -372,7 +424,7 @@ class UtilityMonitor:
             batch_text = "\n---\n".join(messages_to_process)
             full_prompt = f"""{PROMPT}
 
-КОНТЕКСТ ДІАЛОГІВ У ЧАТАХ ЗА ПОТОЧНИЙ ДЕНЬ:
+КОНТЕКСТ ДІАЛОГІВ У ЧАТАХ:
 {context_block}
 
 НОВІ ПОВІДОМЛЕННЯ ДЛЯ АНАЛІЗУ:
@@ -544,22 +596,26 @@ class UtilityMonitor:
         except Exception as e:
             logger.warning(f"Catch-up для @{ENERGY_CHANNEL}: {e}")
 
-        # Підтягуємо повідомлення за сьогодні з моніторених чатів для контексту дня
+        # Підтягуємо повідомлення за вчора та сьогодні з моніторених чатів
         try:
-            today_date = datetime.now(timezone.utc).date()
+            now_kyiv = datetime.now(KYIV_TZ)
+            cutoff_date = get_context_cutoff_date(now_kyiv)
             for chat_ref in MONITORED_CHATS:
                 try:
-                    async for past_m in self.client.iter_messages(chat_ref, limit=35):
-                        if past_m.date and past_m.date.date() == today_date and past_m.raw_text:
-                            self.daily_context.append({
-                                "date": past_m.date,
-                                "chat": chat_ref,
-                                "text": past_m.raw_text[:300]
-                            })
+                    async for past_m in self.client.iter_messages(chat_ref, limit=60):
+                        if past_m.date and past_m.raw_text:
+                            msg_kyiv_date = to_kyiv_datetime(past_m.date).date()
+                            if msg_kyiv_date >= cutoff_date:
+                                self.daily_context.append({
+                                    "date": past_m.date,
+                                    "chat": chat_ref,
+                                    "text": past_m.raw_text[:300]
+                                })
                 except Exception as ce:
                     logger.debug(f"Контекст дня для {chat_ref}: {ce}")
             self.daily_context.sort(key=lambda x: x["date"])
-            logger.info(f"💡 Завантажено {len(self.daily_context)} повідомлень у контекст поточного дня.")
+            self._prune_context(now_kyiv)
+            logger.info(f"💡 Завантажено {len(self.daily_context)} повідомлень у контекст (з дати {cutoff_date}).")
         except Exception as de:
             logger.debug(f"Daily context catchup error: {de}")
 

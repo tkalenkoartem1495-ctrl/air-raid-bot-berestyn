@@ -214,6 +214,71 @@ async def test_state_transitions():
 asyncio.run(test_state_transitions())
 
 
+# ==============================================================================
+# БЛОК 5: ОЧИЩЕННЯ КОНТЕКСТУ МИНУЛИХ ДНІВ ЗА КИЇВСЬКИМ ЧАСОМ (ВЧОРА + СЬОГОДНІ З 12 НОЧІ, ПОЗАВЧОРА ДО 3-4 РАНКУ)
+# ==============================================================================
+print("\n[БЛОК 5] 🕒 Очищення контексту минулих днів за київським часом")
+
+from datetime import datetime, timezone, timedelta
+from utility_bot import KYIV_TZ, get_context_cutoff_date, to_kyiv_datetime
+
+# 5.1 Розрахунок граничної дати до 03:30 ранку (позавчора ще зберігається)
+t_night = datetime(2026, 10, 6, 2, 15, tzinfo=KYIV_TZ)
+cutoff_night = get_context_cutoff_date(t_night)
+assert_test("5.1 До 03:30 ранку зберігається позавчора (сьогодні - 2 дні)", 
+            cutoff_night == (t_night.date() - timedelta(days=2)))
+
+# 5.2 Розрахунок граничної дати після 03:30 ранку (позавчора видаляється, тільки вчора і сьогодні)
+t_morning = datetime(2026, 10, 6, 3, 35, tzinfo=KYIV_TZ)
+cutoff_morning = get_context_cutoff_date(t_morning)
+assert_test("5.2 Після 03:30 ранку позавчора видаляється, гранична дата — вчора (сьогодні - 1 день)", 
+            cutoff_morning == (t_morning.date() - timedelta(days=1)))
+
+# 5.3 Розрахунок граничної дати вдень (вчора + сьогодні)
+t_day = datetime(2026, 10, 6, 14, 0, tzinfo=KYIV_TZ)
+cutoff_day = get_context_cutoff_date(t_day)
+assert_test("5.3 Вдень залишається вчора та сьогодні", 
+            cutoff_day == (t_day.date() - timedelta(days=1)))
+
+# 5.4 Розрахунок після 12 ночі (сьогодні починає формуватись, зберігається вчора і позавчора до 03:30)
+t_midnight = datetime(2026, 10, 7, 0, 5, tzinfo=KYIV_TZ)
+cutoff_midnight = get_context_cutoff_date(t_midnight)
+assert_test("5.4 Після 12 ночі новий день починає формуватись, позавчора зберігається до 03:30", 
+            cutoff_midnight == (t_midnight.date() - timedelta(days=2)))
+
+# 5.5 Практичне очищення контексту в _prune_context
+mon_prune = UtilityMonitor(dummy_client)
+d_today = datetime(2026, 10, 6, 1, 0, tzinfo=KYIV_TZ)
+d_yesterday = d_today - timedelta(days=1)
+d_day_before = d_today - timedelta(days=2)
+d_three_days_ago = d_today - timedelta(days=3)
+
+mon_prune.daily_context = [
+    {"date": d_three_days_ago, "chat": "Чат", "text": "3 дні тому"},
+    {"date": d_day_before, "chat": "Чат", "text": "Позавчора"},
+    {"date": d_yesterday, "chat": "Чат", "text": "Вчора"},
+    {"date": d_today, "chat": "Чат", "text": "Сьогодні з 12 ночі"}
+]
+
+# Очищення о 02:00 ночі (3 дні тому видаляється, позавчора залишається)
+mon_prune._prune_context(now_kyiv=datetime(2026, 10, 6, 2, 0, tzinfo=KYIV_TZ))
+texts_night = [m["text"] for m in mon_prune.daily_context]
+assert_test("5.5 До 03:30 видаляються тільки повідомлення старіші за позавчора", 
+            "3 дні тому" not in texts_night and "Позавчора" in texts_night and len(texts_night) == 3)
+
+# Очищення о 03:35 ранку (позавчора видаляється, залишається вчора і сьогодні)
+mon_prune._prune_context(now_kyiv=datetime(2026, 10, 6, 3, 35, tzinfo=KYIV_TZ))
+texts_morning = [m["text"] for m in mon_prune.daily_context]
+assert_test("5.6 О 03:35 ранку позавчора видаляється, залишається тільки вчора і сьогодні", 
+            "Позавчора" not in texts_morning and "Вчора" in texts_morning and "Сьогодні з 12 ночі" in texts_morning and len(texts_morning) == 2)
+
+# 5.7 Обмеження максимального розміру для економії ресурсів (250 повідомлень)
+for i in range(300):
+    mon_prune.daily_context.append({"date": d_today, "chat": "Чат", "text": f"Msg {i}"})
+mon_prune._prune_context(now_kyiv=datetime(2026, 10, 6, 12, 0, tzinfo=KYIV_TZ))
+assert_test("5.7 Захист пам'яті: контекст обмежено максимумом 250 повідомлень", len(mon_prune.daily_context) == 250)
+
+
 print("\n" + "=" * 70)
 print(f"📊 РЕЗУЛЬТАТ СИМУЛЯЦІЇ: {passed}/{total} тестів пройдено успішно ({passed/total*100:.1f}%)")
 print("=" * 70)
