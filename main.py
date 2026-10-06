@@ -25,6 +25,39 @@ async def memory_clear_loop():
         await asyncio.sleep(600)  # Every 10 minutes
         gc.collect()
 
+async def run_telethon_supervisor(client):
+    """Наглядач за Telethon з автоматичним перепідключенням."""
+    while True:
+        try:
+            if not client.is_connected():
+                logger.info("🔄 Telethon: відновлення підключення до Telegram...")
+                await client.connect()
+                if not await client.is_user_authorized():
+                    logger.critical("❌ Telethon не авторизований! Завершення процесу.")
+                    sys.exit(1)
+                logger.info("✅ Telethon успішно підключено та авторизовано.")
+            
+            await client.run_until_disconnected()
+            logger.warning("⚠️ Telethon відключився. Автоматичне перепідключення через 5 секунд...")
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"❌ Помилка в Telethon supervisor: {e}. Перепідключення через 5 сек...")
+            await asyncio.sleep(5)
+
+async def run_alert_supervisor(alert_monitor):
+    """Наглядач за AlertMonitor з автоматичним перезапуском."""
+    while True:
+        try:
+            logger.info("🚨 AlertMonitor: запуск моніторингу тривог...")
+            await alert_monitor.run()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"❌ Помилка в AlertMonitor: {e}. Перезапуск через 5 сек...")
+            await asyncio.sleep(5)
+
 async def main():
     from bot import (
         AlertMonitor,
@@ -118,17 +151,21 @@ async def main():
     await rent_bot.start()
     await job_bot.start()
     await discount_monitor.start()
-
     try:
         await asyncio.gather(
-            alert_monitor.run(),
-            client.run_until_disconnected()
+            run_alert_supervisor(alert_monitor),
+            run_telethon_supervisor(client)
         )
     except KeyboardInterrupt:
         logger.info("Боти зупинено (Ctrl+C)")
+    except Exception as e:
+        logger.critical(f"❌ Критична неперехоплена помилка: {e}")
+        sys.exit(1)
     finally:
         await alert_monitor.close()
         await client.disconnect()
+        # Якщо головний цикл завершився, процес ПОВИНЕН завершитися, щоб Render перезапустив контейнер
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -419,10 +419,20 @@ async def handle_mem(request):
 async def handle_ping(request):
     return web.Response(text="Бот працює! 🚨")
 
+async def handle_health(request):
+    import json
+    from datetime import datetime, timezone
+    return web.json_response({
+        "status": "ok",
+        "app": "air-raid-bot-berestyn",
+        "time": datetime.now(timezone.utc).isoformat()
+    })
+
 async def init_web_server():
     """Запускає міні-вебсервер, щоб хостинг (напр. Render) не присипляв бота."""
     app = web.Application()
     app.router.add_get('/', handle_ping)
+    app.router.add_get('/health', handle_health)
     app.router.add_get('/mem', handle_mem)
     runner = web.AppRunner(app)
     await runner.setup()

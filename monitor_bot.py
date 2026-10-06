@@ -26,13 +26,13 @@ TELETHON_SESSION = os.environ.get("TELETHON_SESSION", "")
 MONITOR_BOT_TOKEN = os.environ.get("MONITOR_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# Канали для моніторингу та їхні ID для надійності
+# Канали для моніторингу та їхні ID для надійності (підтримуємо обидва формати ID)
 MONITORED_CHANNELS = ["tlknewsua", "radar_kharkov", "nochnojdozorkh", "monitor1654"]
 MONITORED_CHANNEL_IDS = [
-    -1001673474387,  # tlknewsua
-    -1001850203289,  # radar_kharkov
-    -1001667056986,  # NochnojDozorKh
-    -1001104455802,  # monitor1654
+    -1001673474387, 1673474387,  # tlknewsua
+    -1001850203289, 1850203289,  # radar_kharkov
+    -1001667056986, 1667056986,  # NochnojDozorKh
+    -1001104455802, 1104455802,  # monitor1654
 ]
 
 # Ключові слова для фільтрації (регістронезалежно)
@@ -73,29 +73,40 @@ class ChannelMonitor:
         return False
 
     async def _translate(self, text: str) -> str:
-        """Перекладає текст на українську через Gemini."""
+        """Перекладає текст на українську через Gemini або GoogleTranslator."""
+        # Якщо в тексті немає суто російських літер, залишаємо як є
+        if not re.search(r'[ыэъё]', text, re.I):
+            return text
+
+        GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+        if GEMINI_API_KEY:
+            try:
+                import google.generativeai as genai
+                genai.configure(api_key=GEMINI_API_KEY)
+                model = genai.GenerativeModel("gemini-flash-lite-latest")
+                prompt = (
+                    "Переклади наступний текст на чисту українську мову. "
+                    "Збережи всі емодзі та оригінальне форматування. "
+                    "Відповідай ТІЛЬКИ перекладеним текстом:\n\n"
+                    f"{text}"
+                )
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(model.generate_content, prompt),
+                    timeout=4.0
+                )
+                if response and response.text:
+                    return response.text.strip()
+            except Exception as e:
+                logger.warning(f"Помилка перекладу Gemini: {e}. Перемикаємося на GoogleTranslator.")
+
         try:
-            import google.generativeai as genai
-            GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-            if not GEMINI_API_KEY:
-                return text
-                
-            genai.configure(api_key=GEMINI_API_KEY)
-            model = genai.GenerativeModel("gemini-flash-lite-latest")
-            
-            prompt = (
-                "Переклади наступний текст на чисту українську мову. "
-                "Збережи всі емодзі та оригінальне форматування. "
-                "Якщо текст вже українською, просто поверни його без змін. "
-                "Відповідай ТІЛЬКИ перекладеним текстом:\n\n"
-                f"{text}"
+            translated = await asyncio.wait_for(
+                asyncio.to_thread(self.translator.translate, text),
+                timeout=4.0
             )
-            
-            # Gemini block
-            response = await asyncio.to_thread(model.generate_content, prompt)
-            return response.text.strip() if response and response.text else text
+            return translated if translated else text
         except Exception as e:
-            logger.warning(f"Помилка перекладу Gemini: {e}")
+            logger.warning(f"GoogleTranslator error: {e}")
             return text
 
     async def _on_new_message(self, event):
@@ -197,3 +208,26 @@ class ChannelMonitor:
         )
         logger.info(f"🔍 Ключові слова: {', '.join(FILTER_KEYWORDS)}")
         logger.info("=" * 50)
+
+        # Перевірка свіжих повідомлень за останні 15 хвилин при старті
+        try:
+            from datetime import datetime, timedelta, timezone
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=15)
+            for ch in MONITORED_CHANNELS:
+                try:
+                    async for msg in self.client.iter_messages(ch, limit=5):
+                        if msg.date and msg.date < cutoff:
+                            break
+                        if msg.raw_text and self._matches_filter(msg.raw_text):
+                            class FakeEvent:
+                                def __init__(self, m):
+                                    self.raw_text = m.raw_text
+                                    self.chat_id = m.chat_id
+                                    self._msg = m
+                                async def get_chat(self):
+                                    return await self._msg.get_chat()
+                            await self._on_new_message(FakeEvent(msg))
+                except Exception as e:
+                    logger.debug(f"Catchup warning for {ch}: {e}")
+        except Exception as e:
+            logger.warning(f"Catchup error in monitor_bot: {e}")
