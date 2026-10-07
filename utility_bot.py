@@ -495,28 +495,36 @@ class UtilityMonitor:
                         
                         target_chat_id = TELEGRAM_CHAT_ID or os.environ.get("TELEGRAM_CHAT_ID", "")
                         
-                        # STATELESS DEDUPLICATION (перевірка зміни стану Червоний <-> Зелений)
+                        # STATELESS DEDUPLICATION (перевірка зміни стану Червоний <-> Зелений або кулдаун 30 хв)
                         is_duplicate = False
                         try:
+                            now_ts = time.time()
                             if target_chat_id:
                                 async for past_msg in self.client.iter_messages(int(target_chat_id), limit=25):
                                     if not past_msg.text:
                                         continue
                                     past_locs = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', past_msg.text)) - _STOP
                                     if new_locations and new_locations.issubset(past_locs):
+                                        is_recent = past_msg.date and (now_ts - past_msg.date.timestamp()) < DEDUP_WINDOW
                                         if is_green and "Відновлення світла" in past_msg.text:
-                                            is_duplicate = True
-                                            logger.info(f"💡 Дублікат відновлення світла ({actual_locs}) — стан уже зелений. Пропускаємо.")
-                                            break
+                                            if is_recent:
+                                                is_duplicate = True
+                                                logger.info(f"💡 Дублікат відновлення світла ({actual_locs}) за останні 30 хв. Пропускаємо.")
+                                                break
+                                            else:
+                                                break
                                         elif is_red and "Відключення світла" in past_msg.text:
-                                            is_duplicate = True
-                                            logger.info(f"💡 Дублікат відключення світла ({actual_locs}) — стан уже червоний. Пропускаємо.")
-                                            break
+                                            if is_recent:
+                                                is_duplicate = True
+                                                logger.info(f"💡 Дублікат відключення світла ({actual_locs}) за останні 30 хв. Пропускаємо.")
+                                                break
+                                            else:
+                                                break
                                         elif is_green and "Відключення світла" in past_msg.text:
-                                            # Стан змінився з червоного на зелений — дозволяємо!
+                                            # Стан змінився з червоного на зелений — дозволяємо одразу!
                                             break
                                         elif is_red and "Відновлення світла" in past_msg.text:
-                                            # Стан змінився з зеленого на червоний — дозволяємо!
+                                            # Стан змінився з зеленого на червоний — дозволяємо одразу!
                                             break
                         except Exception as e:
                             logger.error(f"Stateless dedup error (light): {e}")
