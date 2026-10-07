@@ -108,6 +108,12 @@ PROMPT = """Ти моніториш повідомлення мешканців 
 - [WATER_OFF] 🔵 Відключення води: {локація}
 - [WATER_QUESTION] 🟡 Питання щодо наявності води: {локація}
 
+СУВОРІ ПРАВИЛА ЧАСУ ТА КОНТЕКСТУ (КРИТИЧНО ВАЖЛИВО):
+1. КОНТЕКСТ — ЦЕ МИНУЛЕ. Категорично заборонено брати старі факти чи події з контексту і створювати з них статуси! Усі події з контексту вже відбулися у минулому і або були опубліковані, або застаріли.
+2. Статус (🔴 Відключення чи 🟢 Відновлення) можна генерувати ВИКЛЮЧНО тоді, коли сам факт зміни (дали світло чи вимкнули) надійшов СВІЖИМ прямо зараз у секції "НОВІ ПОВІДОМЛЕННЯ ДЛЯ АНАЛІЗУ".
+3. Контекст дозволено використовувати ТІЛЬКИ для прив'язки вулиці/району, якщо в НОВОМУ повідомленні є коротка репліка без назви вулиці (наприклад, у контексті питали "Як там на Копиленка?", а в новому повідомленні відповіли "+").
+4. Якщо в "НОВИХ ПОВІДОМЛЕННЯХ ДЛЯ АНАЛІЗУ" немає свіжих фактів зміни стану або якщо нові повідомлення не підтверджують зміни — повертай ТІЛЬКИ NONE.
+
 ПРАВИЛА:
 1. ВІДПОВІДАЙ ВИКЛЮЧНО УКРАЇНСЬКОЮ МОВОЮ (навіть якщо оригінали російською).
 2. Завжди використовуй назву міста Берестин (замість Красноград). Назви районів перекладай: "Высокое" → "Високе", "Піщанка" (пиши просто "Піщанка").
@@ -329,6 +335,13 @@ class UtilityMonitor:
         })
         self._prune_context()
 
+        # Якщо повідомлення надійшло із запізненням понад 3 хвилини (наприклад, затримка мережі/старе),
+        # не додаємо його до активного батчу, щоб уникнути запізнілих хибних публікацій
+        now_utc = datetime.now(timezone.utc)
+        if (now_utc - msg_date).total_seconds() > 180:
+            logger.debug(f"Ігноруємо застаріле повідомлення для батчу (> 3 хв): {text[:50]}")
+            return
+
         logger.info(f"💧/💡 Знайдено нове повідомлення в {chat_title}: {text[:50]}...")
         
         async with self.lock:
@@ -482,27 +495,29 @@ class UtilityMonitor:
                         
                         target_chat_id = TELEGRAM_CHAT_ID or os.environ.get("TELEGRAM_CHAT_ID", "")
                         
-                        # STATELESS DEDUPLICATION (вікно 30 хв)
+                        # STATELESS DEDUPLICATION (перевірка зміни стану Червоний <-> Зелений)
                         is_duplicate = False
                         try:
-                            now_ts = time.time()
                             if target_chat_id:
-                                async for past_msg in self.client.iter_messages(int(target_chat_id), limit=15):
-                                    if past_msg.date and (now_ts - past_msg.date.timestamp()) < DEDUP_WINDOW:
-                                        if not past_msg.text:
-                                            continue
+                                async for past_msg in self.client.iter_messages(int(target_chat_id), limit=25):
+                                    if not past_msg.text:
+                                        continue
+                                    past_locs = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', past_msg.text)) - _STOP
+                                    if new_locations and new_locations.issubset(past_locs):
                                         if is_green and "Відновлення світла" in past_msg.text:
-                                            past_locs = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', past_msg.text)) - _STOP
-                                            if new_locations and new_locations.issubset(past_locs):
-                                                is_duplicate = True
-                                                logger.info(f"💡 Дублікат відновлення світла ({actual_locs}). Пропускаємо.")
-                                                break
+                                            is_duplicate = True
+                                            logger.info(f"💡 Дублікат відновлення світла ({actual_locs}) — стан уже зелений. Пропускаємо.")
+                                            break
                                         elif is_red and "Відключення світла" in past_msg.text:
-                                            past_locs = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', past_msg.text)) - _STOP
-                                            if new_locations and new_locations.issubset(past_locs):
-                                                is_duplicate = True
-                                                logger.info(f"💡 Дублікат відключення світла ({actual_locs}). Пропускаємо.")
-                                                break
+                                            is_duplicate = True
+                                            logger.info(f"💡 Дублікат відключення світла ({actual_locs}) — стан уже червоний. Пропускаємо.")
+                                            break
+                                        elif is_green and "Відключення світла" in past_msg.text:
+                                            # Стан змінився з червоного на зелений — дозволяємо!
+                                            break
+                                        elif is_red and "Відновлення світла" in past_msg.text:
+                                            # Стан змінився з зеленого на червоний — дозволяємо!
+                                            break
                         except Exception as e:
                             logger.error(f"Stateless dedup error (light): {e}")
                             
