@@ -73,6 +73,13 @@ fmt_multi = monitor._format_status_message(raw_multi)
 assert_test("1.3 Форматування мультилокацій для відновлення", 
             "- Центр" in fmt_multi and "- 3 мікрорайон" in fmt_multi)
 
+# 1.4 Нормалізація Петрівка -> вул. Петрівська
+raw_petrivka = "🔴 Відключення світла: Петрівка"
+fmt_petrivka = monitor._format_status_message(raw_petrivka)
+assert_test("1.4 Нормалізація 'Петрівка' -> 'вул. Петрівська'", 
+            "- вул. Петрівська" in fmt_petrivka and "- Петрівка" not in fmt_petrivka)
+
+
 
 # ==============================================================================
 # БЛОК 2: ЖОРСТКЕ БЛОКУВАННЯ ЖОВТИХ СТАТУСІВ ТА ПИТАНЬ (https://t.me/berestyn_ua/8274)
