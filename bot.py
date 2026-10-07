@@ -369,30 +369,18 @@ class AlertMonitor:
         logger.info(f"💬 Telegram Chat ID: {TELEGRAM_CHAT_ID}")
         logger.info("=" * 50)
 
-        # Перший запит
+        # Перший запит — ініціалізація стану без публікації повідомлень
         alerts = await self.fetch_active_alerts()
         if alerts is not None:
             district_alerts = self.filter_district_alerts(alerts)
             for alert in district_alerts:
-                # Якщо тривога почалась менше 10 хвилин тому — можливо, сервер перезавантажувався і ми її пропустили
-                started_str = alert.get("started_at")
-                if started_str:
-                    try:
-                        s_dt = datetime.fromisoformat(started_str.replace("Z", "+00:00"))
-                        now_utc = datetime.now(timezone.utc)
-                        if (now_utc - s_dt).total_seconds() < 600:
-                            logger.info(f"🚨 Свіжа тривога при запуску ({int((now_utc - s_dt).total_seconds())} сек тому)! Буде надіслано сповіщення.")
-                            continue
-                    except Exception:
-                        pass
                 self.active_alerts[alert["id"]] = alert
+                started_time = format_time(alert.get("started_at"))
+                self.published_starts.add(started_time)
             if district_alerts:
-                logger.info(f"ℹ️ При запуску виявлено {len(district_alerts)} тривог у районі")
+                logger.info(f"ℹ️ При запуску виявлено {len(district_alerts)} активних тривог (стан зафіксовано без відправки повідомлень)")
             else:
                 logger.info("ℹ️ При запуску активних тривог немає")
-            
-            # Опрацьовуємо свіжі тривоги, якщо вони є
-            await self.process_alerts(alerts)
 
         # Основний цикл
         while True:

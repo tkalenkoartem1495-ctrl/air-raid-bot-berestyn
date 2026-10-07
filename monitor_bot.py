@@ -200,7 +200,7 @@ class ChannelMonitor:
             logger.error(f"Помилка відправки: {e}")
 
     async def start(self):
-        """Запускає моніторинг каналів."""
+        """Запускає моніторинг каналів. При перезапуску сервера НІЧОГО не публікує."""
         logger.info("=" * 50)
         logger.info("📡 Монітор новинних каналів запущено!")
         logger.info(
@@ -208,26 +208,3 @@ class ChannelMonitor:
         )
         logger.info(f"🔍 Ключові слова: {', '.join(FILTER_KEYWORDS)}")
         logger.info("=" * 50)
-
-        # Перевірка свіжих повідомлень за останні 15 хвилин при старті
-        try:
-            from datetime import datetime, timedelta, timezone
-            cutoff = datetime.now(timezone.utc) - timedelta(minutes=15)
-            for ch in MONITORED_CHANNELS:
-                try:
-                    async for msg in self.client.iter_messages(ch, limit=5):
-                        if msg.date and msg.date < cutoff:
-                            break
-                        if msg.raw_text and self._matches_filter(msg.raw_text):
-                            class FakeEvent:
-                                def __init__(self, m):
-                                    self.raw_text = m.raw_text
-                                    self.chat_id = m.chat_id
-                                    self._msg = m
-                                async def get_chat(self):
-                                    return await self._msg.get_chat()
-                            await self._on_new_message(FakeEvent(msg))
-                except Exception as e:
-                    logger.debug(f"Catchup warning for {ch}: {e}")
-        except Exception as e:
-            logger.warning(f"Catchup error in monitor_bot: {e}")

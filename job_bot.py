@@ -412,17 +412,6 @@ class JobBot:
                             await self._post_report(report)
                         self.last_posted_date = date_key
 
-                # Catch-up якщо час більше 17:30 і ще не публікували сьогодні
-                elif now.hour >= 17 and (now.hour > 17 or now.minute >= 30) and self.last_posted_date != date_key:
-                    already_posted = await self._is_already_posted_today(date_key)
-                    if already_posted:
-                        self.last_posted_date = date_key
-                    else:
-                        logger.info("💼 Пропущено пост про вакансії у графіку! Запускаємо позачерговий випуск...")
-                        report = await self._fetch_and_process()
-                        if not await self._is_already_posted_today(date_key):
-                            await self._post_report(report)
-                        self.last_posted_date = date_key
             except Exception as e:
                 logger.error(f"Помилка в _scheduler_loop (JobBot): {e}")
             
@@ -433,22 +422,7 @@ class JobBot:
         logger.info("💼 Бот 'Робота / Вакансії' запущено!")
         logger.info("=" * 50)
         
-        try:
-            now = datetime.now(self.tz)
-            date_key = now.strftime("%m-%d")
-            if now.hour >= 17 and (now.hour > 17 or now.minute >= 30):
-                already_posted = await self._is_already_posted_today(date_key)
-                if already_posted:
-                    self.last_posted_date = date_key
-                    logger.info("Звіт про роботу вже опублікований сьогодні.")
-                else:
-                    logger.info("💼 Пропущено пост про вакансії! Публікуємо зараз...")
-                    report = await self._fetch_and_process()
-                    if not await self._is_already_posted_today(date_key):
-                        await self._post_report(report)
-                    self.last_posted_date = date_key
-                    logger.info("✅ Пропущений пост про вакансії успішно опубліковано!")
-        except Exception as e:
-            logger.error(f"Помилка при catch-up перевірці (Робота): {e}")
-            
+        # При перезапуску сервера НІЧОГО не публікуємо
+        now = datetime.now(self.tz)
+        self.last_posted_date = now.strftime("%m-%d")
         asyncio.create_task(self._scheduler_loop())

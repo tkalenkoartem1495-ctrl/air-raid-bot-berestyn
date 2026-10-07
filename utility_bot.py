@@ -580,21 +580,26 @@ class UtilityMonitor:
         logger.info(f"⚡ Офіційний канал енерго: @{ENERGY_CHANNEL}")
         logger.info("=" * 50)
         
-        # Підписка та підтягування свіжих повідомлень Харківобленерго за останні 24 години
+        # Підписка на канал Харківобленерго (при старті нічого не публікуємо)
         try:
             from telethon.tl.functions.channels import JoinChannelRequest
             try:
                 await self.client(JoinChannelRequest(ENERGY_CHANNEL))
             except Exception:
                 pass
-                
-            cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-            msgs = await self.client.get_messages(ENERGY_CHANNEL, limit=10)
-            for m in reversed(msgs):
-                if m and m.date and m.date >= cutoff:
-                    await self._handle_energy_message(m)
+            # Фіксуємо останній пост у пам'яті без надсилання, щоб не публікувати при перезапуску
+            msgs = await self.client.get_messages(ENERGY_CHANNEL, limit=3)
+            for m in msgs:
+                if m and m.raw_text:
+                    sched = extract_energy_schedule(m.raw_text)
+                    if sched:
+                        self.energy_posts[m.id] = {
+                            "sent_msg_id": None,
+                            "schedule": sched,
+                            "timestamp": time.time()
+                        }
         except Exception as e:
-            logger.warning(f"Catch-up для @{ENERGY_CHANNEL}: {e}")
+            logger.warning(f"Канал @{ENERGY_CHANNEL} init: {e}")
 
         # Підтягуємо повідомлення за вчора та сьогодні з моніторених чатів
         try:
