@@ -73,11 +73,17 @@ fmt_multi = monitor._format_status_message(raw_multi)
 assert_test("1.3 Форматування мультилокацій для відновлення", 
             "- Центр" in fmt_multi and "- 3 мікрорайон" in fmt_multi)
 
-# 1.4 Нормалізація Петрівка -> вул. Петрівська
+# 1.4 Збереження Петрівки як окремого населеного пункту/району
 raw_petrivka = "🔴 Відключення світла: Петрівка"
 fmt_petrivka = monitor._format_status_message(raw_petrivka)
-assert_test("1.4 Нормалізація 'Петрівка' -> 'вул. Петрівська'", 
-            "- вул. Петрівська" in fmt_petrivka and "- Петрівка" not in fmt_petrivka)
+assert_test("1.4 Збереження 'Петрівка' як 'Петрівка'", 
+            "- Петрівка" in fmt_petrivka and "вул. Петрівська" not in fmt_petrivka)
+
+# 1.5 Нормалізація Петрівска / Петрівська -> вул. Петрівська
+raw_petrivska = "🔴 Відключення світла: Петрівска"
+fmt_petrivska = monitor._format_status_message(raw_petrivska)
+assert_test("1.5 Нормалізація 'Петрівска' -> 'вул. Петрівська'", 
+            "- вул. Петрівська" in fmt_petrivska and "- Петрівска" not in fmt_petrivska)
 
 
 
