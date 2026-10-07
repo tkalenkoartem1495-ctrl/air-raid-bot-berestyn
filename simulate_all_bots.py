@@ -208,6 +208,8 @@ rent_sample_msgs = [
     {"user": "@seeker2", "text": "Сімʼя зніме квартиру на тривалий термін 0668710539", "link": "https://t.me/c/12"},
     {"user": "@garage_owner", "text": "Сдам в аренду гаражные боксы в г. Берестин под склад", "link": "https://t.me/c/13"},
     {"user": "@cleaner", "text": "Предоставлю услуги по уборке квартиры, дома, сиделки", "link": "https://t.me/c/14"},
+    {"user": "@chat_asker", "text": "У кого то есть чат Зачепиловки где здают квартиры?", "link": "https://t.me/c/15"},
+    {"user": "@who_rents", "text": "Підкажіть, хто здає 1-кімнатну квартиру в Берестині?", "link": "https://t.me/c/16"},
     {"user": "@owner_dup", "text": "Здам 2-кімнатну квартиру на 3 мкрн, 4000 грн. 0661112233", "link": "https://t.me/c/10"},
 ]
 
@@ -216,10 +218,14 @@ rent_offers = rent_res["offering"]
 rent_seeks = rent_res["seeking"]
 
 assert_test("7.1 Виявлення здачі житла в оренду", len(rent_offers) == 1 and "2-кімнатну" in rent_offers[0]["summary"])
-assert_test("7.2 Виявлення пошуку житла (квартири, для сім'ї)", len(rent_seeks) == 2 and any("2-кімнатна" in s["summary"] for s in rent_seeks))
+assert_test("7.2 Виявлення пошуку житла (квартири, для сім'ї)", len(rent_seeks) == 3 and any("2-кімнатна" in s["summary"] for s in rent_seeks))
 assert_test("7.3 Повне відсіювання комерційного шуму (гаражі, прибирання)", 
             not any("гараж" in x["summary"].lower() or "уборке" in x["summary"].lower() for x in rent_offers + rent_seeks))
 assert_test("7.4 Дедуплікація повторних оголошень оренди за посиланням", len([o for o in rent_offers if o["link"] == "https://t.me/c/10"]) == 1)
+assert_test("7.5 Блокування запитів на пошук чатів/груп (не здача і не пошук)", 
+            not any("Зачепиловки" in x["summary"] or "чат" in x["summary"].lower() for x in rent_offers + rent_seeks))
+assert_test("7.6 Запитання 'хто здає квартиру' класифікується як пошук житла, а не здача", 
+            any("1-кімнатна" in s["summary"] for s in rent_seeks) and not any("хто здає" in o["summary"].lower() for o in rent_offers))
 
 
 # ==============================================================================

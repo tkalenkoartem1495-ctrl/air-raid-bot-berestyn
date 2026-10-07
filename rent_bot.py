@@ -28,7 +28,20 @@ RENT_KEYWORDS = [
 IRRELEVANT_PATTERNS = [
     r"гараж", r"бокс", r"склад", r"магазин", r"офіс", r"кабінет", r"приміщен",
     r"прибирання", r"сиделк", r"ремонт.*технік", r"плитк", r"керамограніт",
-    r"світл", r"обстріл", r"перебої", r"шука[єе][мт]о?\s+(кота|кішку|собак)"
+    r"світл", r"обстріл", r"перебої", r"шука[єе][мт]о?\s+(кота|кішку|собак)",
+    r"(?:у кого|чи є|хтось має|підкажіть|скиньте|де є|поділіться|шукаю)\s+.*(?:чат|груп[ауі]|канал|посилання|силк)",
+    r"\bчат\b.*(?:здають|сдают|оренд|аренд)",
+    r"зачепиловк", r"зачепилівк", r"кегичівк", r"кегичевк"
+]
+
+OFFER_KEYWORDS = [
+    r"\bздам\b", r"\bсдам\b", r"\bздається\b", r"\bсдается\b", 
+    r"\bздаю\b", r"\bсдаю\b", r"\bздаємо\b", r"\bсдаем\b"
+]
+
+SEEK_KEYWORDS = [
+    r"\bшука[юємо]*\b", r"\bищу\b", r"\bищем\b", 
+    r"\bзнім[уемо]*\b", r"\bзніме\b", r"\bсниму\b", r"\bснимет\b", r"\bснимем\b"
 ]
 
 OFFERING_PATTERNS = [
@@ -44,6 +57,38 @@ SEEKING_PATTERNS = [
     r"сниму\s+(квартир|будинок|комнат|жиль)",
     r"шукаємо\s+квартиру",
 ]
+
+
+def is_valid_offering(summary: str, text: str = "") -> bool:
+    """Перевіряє, чи є запис реальною пропозицією оренди від власника."""
+    combined = (summary + " " + text).lower()
+    if any(re.search(p, combined, re.I) for p in IRRELEVANT_PATTERNS):
+        return False
+    if any(re.search(p, combined, re.I) for p in SEEK_KEYWORDS):
+        return False
+    if re.search(r"(?:чат|груп[ауі]|канал|посилання|силк)", combined, re.I):
+        return False
+    if "?" in combined and any(q in combined for q in ["хто", "чи", "де", "у кого", "підкажіть"]):
+        return False
+    if re.search(r"(?:у кого|підкажіть|чи є|де є|хто)\s+.*(?:здає|здають|сдает|сдают)", combined, re.I):
+        return False
+    return True
+
+
+def is_valid_seeking(summary: str, text: str = "") -> bool:
+    """Перевіряє, чи є запис реальним пошуком житла."""
+    combined = (summary + " " + text).lower()
+    if any(re.search(p, combined, re.I) for p in IRRELEVANT_PATTERNS):
+        return False
+    if re.search(r"(?:у кого|чи є|де є|підкажіть|скиньте|хтось має|поділіться)\s+.*(?:чат|груп[ауі]|канал|посилання|силк)", combined, re.I):
+        return False
+    if re.search(r"\bчат\b.*(?:здають|сдают|оренд|аренд)", combined, re.I):
+        return False
+    has_offer = any(re.search(p, combined, re.I) for p in OFFER_KEYWORDS)
+    has_seek = any(re.search(p, combined, re.I) for p in SEEK_KEYWORDS)
+    if has_offer and not has_seek and "?" not in combined:
+        return False
+    return True
 
 def smart_dedup(arr):
     seen_links = set()
@@ -108,24 +153,26 @@ class RentBot:
             if any(re.search(pat, t, re.I) for pat in IRRELEVANT_PATTERNS):
                 continue
 
-            has_offer_kw = any(w in t for w in ["здам", "сдам", "здається", "сдается", "здаю", "сдаю"])
-            has_seek_kw = any(w in t for w in ["шукаю", "шукаємо", "ищу", "зніму", "зніме", "сниму", "снимет"])
+            has_offer_kw = any(re.search(pat, t, re.I) for pat in OFFER_KEYWORDS)
+            has_seek_kw = any(re.search(pat, t, re.I) for pat in SEEK_KEYWORDS)
             has_housing_kw = any(w in t for w in ["квартир", "будин", "дом", "кімнат", "комнат", "житл", "жиль"])
 
             if not has_housing_kw:
                 continue
 
+            is_question = bool(re.search(r"(хто|чи|де|у кого|підкажіть)\s+.*(?:здає|сдает|здають|сдают)", t, re.I)) or ("?" in t and any(w in t for w in ["хто", "чи", "де", "у кого", "підкажіть"]))
+
             phone_match = re.search(r"(\+?380\d{9}|0\d{9})", raw)
             phone_str = f" ({phone_match.group(0)})" if phone_match else ""
 
-            if has_offer_kw and not has_seek_kw:
+            if has_offer_kw and not has_seek_kw and not is_question:
                 summary = raw.split("\n")[0][:80].strip() + phone_str
                 offering.append({
                     "user": m.get("user", "Невідомо"),
                     "summary": summary,
                     "link": m.get("link", "")
                 })
-            elif has_seek_kw:
+            elif has_seek_kw or is_question:
                 desc = ""
                 if "двокімнатн" in t or "2-к" in t or "2-кімнатн" in t or "2 кімнатн" in t:
                     desc = "2-кімнатна квартира"
@@ -224,11 +271,16 @@ class RentBot:
 
 ІНСТРУКЦІЯ САМОПЕРЕВІРКИ:
 ПРОХІД 1 (Класифікація):
-- Здають житло (offering): конкретні пропозиції від орендодавців, які здають власне житло (квартири, будинки, кімнати).
-- Шукають житло (seeking): люди, які хочуть орендувати житло для себе.
+- Здають житло (offering): ВИКЛЮЧНО прямі пропозиції від орендодавців/власників, які здають власне житло ("Здам квартиру", "Здається будинок", "Сдам комнату").
+  КАТЕГОРИЧНО ЗАБОРОНЕНО додавати в offering запитання мешканців ("Хто здає?", "Чи здає хтось?", "У кого є чат де здають квартири?").
+- Шукають житло (seeking): люди, які хочуть орендувати житло для себе ("Зніму квартиру", "Шукаємо будинок", "Хто здає квартиру?").
 
 ПРОХІД 2 (Сувора фільтрація шуму):
-- СУВОРО ВИДАЛИ: гаражі, бокси, склади, офіси, магазини, комерційні приміщення, послуги прибирання/доглядальниці, новини, ремонт техніки, продаж.
+- СУВОРО ВИДАЛИ (НЕ включати ні в offering, ні в seeking):
+  * Запитання про наявність чатів, груп, каналів, посилань (наприклад: "у кого є чат де здають квартири", "підкажіть групу", "скиньте силку").
+  * Комерційні приміщення: гаражі, бокси, склади, офіси, магазини, кабінети.
+  * Послуги та стороннє: прибирання, доглядальниці, ремонти, продаж, втрачені тварини/речі.
+  * Інші населені пункти, не пов'язані з Берестином/районом (наприклад, Зачепилівка тощо).
 - Переконайся, що посилання (link) збережено ТОЧНО як у вхідних даних.
 - Зроби інформативний стислий опис (summary) типу житла та умов.
 
@@ -249,13 +301,18 @@ class RentBot:
                     raw_off = parsed.get("offering", [])
                     raw_seek = parsed.get("seeking", [])
                     
+                    link_to_text = {m.get("link", ""): m.get("text", "") for m in messages_data}
+                    
                     for item in raw_off:
-                        s_low = item.get("summary", "").lower()
-                        if not any(re.search(p, s_low, re.I) for p in IRRELEVANT_PATTERNS):
+                        orig = link_to_text.get(item.get("link", ""), "")
+                        if is_valid_offering(item.get("summary", ""), orig):
                             offering.append(item)
+                        elif is_valid_seeking(item.get("summary", ""), orig):
+                            seeking.append(item)
+                            
                     for item in raw_seek:
-                        s_low = item.get("summary", "").lower()
-                        if not any(re.search(p, s_low, re.I) for p in IRRELEVANT_PATTERNS):
+                        orig = link_to_text.get(item.get("link", ""), "")
+                        if is_valid_seeking(item.get("summary", ""), orig):
                             seeking.append(item)
                     classified = True
             except Exception as e:
