@@ -138,6 +138,48 @@ def get_earliest_outage_time(schedule_str: str):
     return min(times) if times else None
 
 
+def parse_outage_intervals(schedule_str: str):
+    """Повертає список кортежів (start_time, end_time) з рядка графіка."""
+    if not schedule_str:
+        return []
+    from datetime import time
+    intervals = []
+    pattern = r'(\d{1,2}):(\d{2})\s*(?:[:\-–—]|до)\s*(\d{1,2}):(\d{2})'
+    for m in re.finditer(pattern, schedule_str):
+        sh, sm = int(m.group(1)), int(m.group(2))
+        eh, em = int(m.group(3)), int(m.group(4))
+        st = time(sh, sm)
+        if eh == 24 and em == 0:
+            et = time(23, 59, 59)
+        elif 0 <= eh <= 23 and 0 <= em <= 59:
+            et = time(eh, em)
+        else:
+            continue
+        intervals.append((st, et))
+    return intervals
+
+
+def is_time_in_intervals(t, intervals: list) -> bool:
+    """Перевіряє, чи потрапляє час t в будь-який з інтервалів (start_time, end_time)."""
+    if not intervals or t is None:
+        return False
+    for st, et in intervals:
+        if st <= et:
+            if st <= t <= et:
+                return True
+        else:
+            # Перехід через північ (наприклад, 23:00 - 02:00)
+            if t >= st or t <= et:
+                return True
+    return False
+
+
+def is_time_in_schedule(t, schedule_str: str) -> bool:
+    """Перевіряє, чи потрапляє час t у рядок графіка відключень."""
+    intervals = parse_outage_intervals(schedule_str)
+    return is_time_in_intervals(t, intervals)
+
+
 def format_energy_message(schedule_time: str) -> str:
     """Форматує офіційне повідомлення про відключення світла для Берестина."""
     return f"Згідно інформації Харківобленерго, у Берестині планується відключення світла: {schedule_time}"
@@ -429,6 +471,50 @@ class UtilityMonitor:
                 continue
             await self._process_energy_schedule_entry(entry)
 
+    async def is_scheduled_outage_active(self, dt_kyiv: datetime | None = None) -> tuple[bool, str | None]:
+        """Перевіряє, чи діє зараз офіційний графік відключень, який вже був опублікований ботом.
+        Повертає (True, schedule_str), якщо:
+        1. Бот світла опублікував повідомлення про графік відключень на поточний день.
+        2. Поточний київський час потрапляє в один з інтервалів цього графіка відключень.
+        Інакше повертає (False, None).
+        """
+        if dt_kyiv is None or not is_valid_datetime(dt_kyiv):
+            dt_kyiv = datetime.now(KYIV_TZ)
+        current_date = dt_kyiv.date()
+        current_time = dt_kyiv.time()
+
+        # 1. Перевірка через збережені розклади в пам'яті
+        for entry in self.energy_schedules.values():
+            if entry.get("target_date") == current_date:
+                has_been_sent = bool(entry.get("sent_msg_ids") or entry.get("sent_checkpoints"))
+                if has_been_sent:
+                    sched = entry.get("schedule", "")
+                    if is_time_in_schedule(current_time, sched):
+                        return True, sched
+
+        # 2. Безстанова перевірка (Stateless check): перегляд історії цільового каналу
+        target_chat_id = TELEGRAM_CHAT_ID or os.environ.get("TELEGRAM_CHAT_ID", "")
+        if self.client and target_chat_id:
+            try:
+                async for past_msg in self.client.iter_messages(int(target_chat_id), limit=30):
+                    if not past_msg.text:
+                        continue
+                    text_lower = past_msg.text.lower()
+                    if "відключення світла" in text_lower and ("харківобленерго" in text_lower or "берестині" in text_lower):
+                        p_raw = getattr(past_msg, "date", None)
+                        p_dt = to_kyiv_datetime(p_raw) if is_valid_datetime(p_raw) else dt_kyiv
+                        t_date = parse_energy_target_date(past_msg.text, p_dt) or p_dt.date()
+                        if t_date == current_date:
+                            m = re.search(r'відключення світла:\s*([^\n]+)', past_msg.text, re.IGNORECASE)
+                            sched = m.group(1).strip() if m else extract_energy_schedule(past_msg.text)
+                            if sched and is_time_in_schedule(current_time, sched):
+                                return True, sched
+            except Exception as e:
+                logger.debug(f"Помилка безстанової перевірки графіка відключень: {e}")
+
+        return False, None
+
+
     def _format_status_message(self, clean_text: str) -> str:
         """Перетворює текст в список з булітами."""
         match = re.match(r"(🔴 Відключення світла:|🟢 Відновлення світла:|🔵 Відключення води:|🟡 Питання щодо наявності світла:|🟡 Питання щодо наявності води:)\s*(.*)", clean_text)
@@ -587,23 +673,30 @@ class UtilityMonitor:
 
             # 1. ПЕРЕВІРКА ПАЧКИ (Публікація зібраних адрес світла, якщо минув час)
             if self.light_accumulated_locations and now_ts >= self.light_accumulating_until:
-                locs = list(self.light_accumulated_locations)
-                if "Берестин" in locs and len(locs) > 1:
-                    locs.remove("Берестин")
-                
-                header = "🔴 Відключення світла:\n\n"
-                for loc in locs:
-                    header += f"- {loc}\n"
-                
-                try:
-                    await self.light_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=header.strip())
-                    logger.info(f"🕒 ПАЧКА ОПУБЛІКОВАНА: {locs}")
-                except Exception as e:
-                    logger.error(f"Error sending accumulated batch: {e}")
-                
-                self.light_accumulated_locations.clear()
-                self.light_outage_timestamps.clear()
-                self.light_accumulating_until = 0
+                is_active, sched_info = await self.is_scheduled_outage_active()
+                if is_active:
+                    logger.info(f"💡 [Графік відключень] Час попадає у графік відключення ({sched_info}). Скасовано публікацію зібраної пачки.")
+                    self.light_accumulated_locations.clear()
+                    self.light_outage_timestamps.clear()
+                    self.light_accumulating_until = 0
+                else:
+                    locs = list(self.light_accumulated_locations)
+                    if "Берестин" in locs and len(locs) > 1:
+                        locs.remove("Берестин")
+                    
+                    header = "🔴 Відключення світла:\n\n"
+                    for loc in locs:
+                        header += f"- {loc}\n"
+                    
+                    try:
+                        await self.light_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=header.strip())
+                        logger.info(f"🕒 ПАЧКА ОПУБЛІКОВАНА: {locs}")
+                    except Exception as e:
+                        logger.error(f"Error sending accumulated batch: {e}")
+                    
+                    self.light_accumulated_locations.clear()
+                    self.light_outage_timestamps.clear()
+                    self.light_accumulating_until = 0
 
             async with self.lock:
                 if not self.batch:
@@ -663,6 +756,16 @@ class UtilityMonitor:
                         clean_text = line.replace("[LIGHT_OFF]", "").replace("[LIGHT_ON]", "").replace("[LIGHT]", "").strip()
                         clean_text = self._replace_city_name(clean_text)
                         
+                        # Перевірка графіка відключень:
+                        # Якщо бот опублікував повідомлення про відключення світла і час попадає у графік,
+                        # на час відключень бот більше не публікує повідомлень про відключення світла.
+                        # Виключення: повідомлення про відновлення світла (is_green).
+                        if is_red:
+                            is_active, sched_info = await self.is_scheduled_outage_active()
+                            if is_active:
+                                logger.info(f"💡 [Графік відключень] Час попадає у графік відключення ({sched_info}). Повідомлення про відключення світла не публікується: {clean_text}")
+                                continue
+
                         # Витягуємо назви районів/вулиць (виключаємо шаблонні слова)
                         new_locations = set(re.findall(r'\b[А-ЯІЇЄ][а-яіїє\']+\b', clean_text)) - _STOP
                         actual_locs = new_locations if new_locations else {"Берестин"}

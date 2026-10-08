@@ -34,6 +34,9 @@ from utility_bot import (
     format_energy_message,
     parse_energy_target_date,
     get_earliest_outage_time,
+    parse_outage_intervals,
+    is_time_in_intervals,
+    is_time_in_schedule,
     UtilityMonitor,
     ENERGY_CHANNEL,
     ENERGY_CHANNEL_IDS,
@@ -388,6 +391,212 @@ async def run_next_day_lifecycle_simulation():
         utility_bot.datetime = original_now
 
 asyncio.run(run_next_day_lifecycle_simulation())
+
+# ==============================================================================
+# БЛОК 5: 🚫 БЛОКУВАННЯ ПОВІДОМЛЕНЬ ПРО ВІДКЛЮЧЕННЯ ПІД ЧАС ДІЇ ГРАФІКА
+#         (ВИКЛЮЧЕННЯ: ВІДНОВЛЕННЯ СВІТЛА)
+# ==============================================================================
+print("\n[БЛОК 5] 🚫 Блокування скарг про відключення під час активного графіка (виключення: відновлення)")
+
+# 5.1 Парсинг інтервалів з одного проміжку '13:00 – 16:30'
+inter_single = parse_outage_intervals("13:00 – 16:30")
+from datetime import time
+assert_test("5.1 Парсинг інтервалу '13:00 – 16:30'", inter_single == [(time(13, 0), time(16, 30))])
+
+# 5.2 Парсинг інтервалів з кількох проміжків '07:00 – 10:00; 13:00 – 16:30'
+inter_multi = parse_outage_intervals("07:00 – 10:00; 13:00 – 16:30")
+assert_test("5.2 Парсинг кількох інтервалів '07:00 – 10:00; 13:00 – 16:30'",
+            inter_multi == [(time(7, 0), time(10, 0)), (time(13, 0), time(16, 30))])
+
+# 5.3 Обробка опівночі / 24:00 ('22:30 – 24:00')
+inter_midnight = parse_outage_intervals("22:30 – 24:00")
+assert_test("5.3 Обробка інтервалу з 24:00 ('22:30 – 24:00')",
+            inter_midnight == [(time(22, 30), time(23, 59, 59))])
+
+# 5.4 is_time_in_schedule: до початку відключення (12:59 -> False)
+assert_test("5.4 До початку графіка (12:59) відключення ще не активне",
+            not is_time_in_schedule(time(12, 59), "13:00 – 16:30"))
+
+# 5.5 is_time_in_schedule: під час відключення (13:00 -> True, 14:30 -> True, 16:30 -> True)
+assert_test("5.5 Під час графіка (13:00, 14:30, 16:30) відключення активне",
+            is_time_in_schedule(time(13, 0), "13:00 – 16:30") and
+            is_time_in_schedule(time(14, 30), "13:00 – 16:30") and
+            is_time_in_schedule(time(16, 30), "13:00 – 16:30"))
+
+# 5.6 is_time_in_schedule: після закінчення відключення (16:31 -> False)
+assert_test("5.6 Після закінчення графіка (16:31) відключення не активне",
+            not is_time_in_schedule(time(16, 31), "13:00 – 16:30"))
+
+async def test_scheduled_outage_suppression():
+    from datetime import date
+    test_client = MagicMock()
+    test_light_bot = AsyncMock()
+    test_monitor = UtilityMonitor(test_client)
+    test_monitor.light_bot = test_light_bot
+
+    # Додаємо розклад на 8 жовтня 13:00 – 16:30, який вже було опубліковано в канал (sent_msg_ids = [8774])
+    test_monitor.energy_schedules[2195] = {
+        "msg_id": 2195,
+        "schedule": "13:00 – 16:30",
+        "target_date": date(2026, 10, 8),
+        "msg_date": date(2026, 10, 7),
+        "earliest_time": time(13, 0),
+        "sent_checkpoints": {"announced"},
+        "sent_msg_ids": [8774]
+    }
+
+    # 5.7 Перевірка is_scheduled_outage_active о 13:10 на 8 жовтня
+    active_now, sched_now = await test_monitor.is_scheduled_outage_active(KYIV_TZ.localize(datetime(2026, 10, 8, 13, 10)))
+    assert_test("5.7 is_scheduled_outage_active о 13:10 повертає True і графік",
+                active_now is True and sched_now == "13:00 – 16:30")
+
+    # 5.8 Перевірка на іншу дату (9 жовтня о 13:10) -> False
+    active_other_date, _ = await test_monitor.is_scheduled_outage_active(KYIV_TZ.localize(datetime(2026, 10, 9, 13, 10)))
+    assert_test("5.8 is_scheduled_outage_active на іншу дату повертає False", active_other_date is False)
+
+    # 5.9 Перевірка після завершення графіка (8 жовтня о 16:45) -> False
+    active_post, _ = await test_monitor.is_scheduled_outage_active(KYIV_TZ.localize(datetime(2026, 10, 8, 16, 45)))
+    assert_test("5.9 is_scheduled_outage_active після завершення графіка (16:45) повертає False", active_post is False)
+
+    # Симуляція обробки батчу під час графіка (о 13:15)
+    import utility_bot
+    orig_datetime = utility_bot.datetime
+
+    class FakeBatchDatetime(datetime):
+        _current_time = KYIV_TZ.localize(datetime(2026, 10, 8, 13, 15))
+        @classmethod
+        def now(cls, tz=None):
+            if tz:
+                return cls._current_time.astimezone(tz)
+            return cls._current_time
+
+    utility_bot.datetime = FakeBatchDatetime
+    try:
+        # Мокаємо модель Gemini
+        mock_model = MagicMock()
+        test_monitor.model = mock_model
+
+        # 5.10 СКАРГА ПРО ВІДКЛЮЧЕННЯ ПІД ЧАС ГРАФІКА (має бути заблокована)
+        test_monitor.batch = ["[Чат] Немає світла на Полтавській"]
+        mock_resp_off = MagicMock()
+        mock_resp_off.text = "[LIGHT_OFF] 🔴 Відключення світла: вул. Полтавська"
+        mock_model.generate_content.return_value = mock_resp_off
+
+        test_light_bot.send_message.reset_mock()
+        
+        async with test_monitor.lock:
+            msgs_to_proc = list(test_monitor.batch)
+            test_monitor.batch.clear()
+
+        resp = mock_model.generate_content("test").text.strip()
+        lines = resp.split('\n')
+        for line in lines:
+            if ("[LIGHT" in line or "Відключення світла" in line or "Відновлення світла" in line) and test_monitor.light_bot:
+                is_green = "🟢" in line or "[LIGHT_ON]" in line or "Відновлення світла" in line
+                is_red = "🔴" in line or "[LIGHT_OFF]" in line or "Відключення світла" in line
+                clean_text = line.replace("[LIGHT_OFF]", "").replace("[LIGHT_ON]", "").strip()
+                clean_text = test_monitor._replace_city_name(clean_text)
+                
+                if is_red:
+                    is_active, sched_info = await test_monitor.is_scheduled_outage_active()
+                    if is_active:
+                        continue
+                formatted = test_monitor._format_status_message(clean_text)
+                await test_light_bot.send_message(chat_id="-1001110859952", text=formatted)
+
+        assert_test("5.10 Під час графіка: скарга про відключення світла блокується і НЕ відправляється",
+                    test_light_bot.send_message.call_count == 0)
+
+        # 5.11 СКАСУВАННЯ ЗІБРАНОЇ ПАЧКИ ПІД ЧАС ГРАФІКА
+        import time as time_mod
+        test_monitor.light_accumulated_locations = {"вул. Полтавська", "Піщанка"}
+        test_monitor.light_accumulating_until = time_mod.time() - 10  # час сплив
+        is_active, sched_info = await test_monitor.is_scheduled_outage_active()
+        if is_active:
+            test_monitor.light_accumulated_locations.clear()
+            test_monitor.light_outage_timestamps.clear()
+            test_monitor.light_accumulating_until = 0
+
+        assert_test("5.11 Під час графіка: зібрана пачка відключень скасовується і очищається",
+                    len(test_monitor.light_accumulated_locations) == 0 and test_monitor.light_accumulating_until == 0)
+
+        # 5.12 ВИКЛЮЧЕННЯ: ВІДНОВЛЕННЯ СВІТЛА ПІД ЧАС ГРАФІКА (МАЄ ВІДПРАВИТИСЬ!)
+        test_monitor.batch = ["[Чат] Дали світло на Полтавській!"]
+        mock_resp_on = MagicMock()
+        mock_resp_on.text = "[LIGHT_ON] 🟢 Відновлення світла: вул. Полтавська"
+        mock_model.generate_content.return_value = mock_resp_on
+
+        test_light_bot.send_message.reset_mock()
+        async with test_monitor.lock:
+            msgs_to_proc = list(test_monitor.batch)
+            test_monitor.batch.clear()
+
+        resp = mock_model.generate_content("test").text.strip()
+        lines = resp.split('\n')
+        for line in lines:
+            if ("[LIGHT" in line or "Відключення світла" in line or "Відновлення світла" in line) and test_monitor.light_bot:
+                is_green = "🟢" in line or "[LIGHT_ON]" in line or "Відновлення світла" in line
+                is_red = "🔴" in line or "[LIGHT_OFF]" in line or "Відключення світла" in line
+                clean_text = line.replace("[LIGHT_OFF]", "").replace("[LIGHT_ON]", "").strip()
+                clean_text = test_monitor._replace_city_name(clean_text)
+                
+                if is_red:
+                    is_active, sched_info = await test_monitor.is_scheduled_outage_active()
+                    if is_active:
+                        continue
+                formatted = test_monitor._format_status_message(clean_text)
+                await test_light_bot.send_message(chat_id="-1001110859952", text=formatted)
+
+        assert_test("5.12 ВИКЛЮЧЕННЯ: відновлення світла під час графіка публікується в канал",
+                    test_light_bot.send_message.call_count == 1)
+
+        # 5.13 ПІСЛЯ ЗАКІНЧЕННЯ ГРАФІКА (о 16:45): ВІДКЛЮЧЕННЯ ЗНОВУ ПУБЛІКУЄТЬСЯ
+        FakeBatchDatetime._current_time = KYIV_TZ.localize(datetime(2026, 10, 8, 16, 45))
+        test_light_bot.send_message.reset_mock()
+        mock_model.generate_content.return_value = mock_resp_off
+
+        resp = mock_model.generate_content("test").text.strip()
+        lines = resp.split('\n')
+        for line in lines:
+            if ("[LIGHT" in line or "Відключення світла" in line or "Відновлення світла" in line) and test_monitor.light_bot:
+                is_green = "🟢" in line or "[LIGHT_ON]" in line or "Відновлення світла" in line
+                is_red = "🔴" in line or "[LIGHT_OFF]" in line or "Відключення світла" in line
+                clean_text = line.replace("[LIGHT_OFF]", "").replace("[LIGHT_ON]", "").strip()
+                clean_text = test_monitor._replace_city_name(clean_text)
+                
+                if is_red:
+                    is_active, sched_info = await test_monitor.is_scheduled_outage_active()
+                    if is_active:
+                        continue
+                formatted = test_monitor._format_status_message(clean_text)
+                await test_light_bot.send_message(chat_id="-1001110859952", text=formatted)
+
+        assert_test("5.13 Після закінчення графіка (о 16:45): відключення світла знову публікується",
+                    test_light_bot.send_message.call_count == 1)
+
+        # 5.14 STATELESS DEDUP: перезапуск сервера під час активного графіка (знаходить повідомлення в каналі)
+        FakeBatchDatetime._current_time = KYIV_TZ.localize(datetime(2026, 10, 8, 14, 0))
+        
+        stateless_client = MagicMock()
+        chan_msg = MagicMock()
+        chan_msg.text = "Згідно інформації Харківобленерго, у Берестині планується відключення світла: 13:00 – 16:30"
+        chan_msg.date = KYIV_TZ.localize(datetime(2026, 10, 8, 12, 0))
+        
+        async def fake_iter(*args, **kwargs):
+            yield chan_msg
+
+        stateless_client.iter_messages = fake_iter
+        
+        stateless_monitor = UtilityMonitor(stateless_client)
+        stateless_active, stateless_sched = await stateless_monitor.is_scheduled_outage_active()
+        assert_test("5.14 Stateless Dedup: після чистого перезапуску графік знаходиться в каналі і блокує відключення",
+                    stateless_active is True and stateless_sched == "13:00 – 16:30")
+
+    finally:
+        utility_bot.datetime = orig_datetime
+
+asyncio.run(test_scheduled_outage_suppression())
+
 
 print("\n" + "=" * 70)
 print(f"📊 РЕЗУЛЬТАТ СИМУЛЯЦІЇ: {passed}/{total} тестів пройдено успішно ({passed/total*100:.1f}%)")
