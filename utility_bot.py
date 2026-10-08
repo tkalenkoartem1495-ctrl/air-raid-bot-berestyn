@@ -47,6 +47,11 @@ def to_kyiv_datetime(dt: datetime) -> datetime:
     return dt.astimezone(KYIV_TZ)
 
 
+def is_valid_datetime(obj):
+    """Перевіряє, чи є об'єкт валідним datetime (відсікає MagicMock у тестах)."""
+    return obj is not None and hasattr(obj, 'year') and hasattr(obj, 'month') and not hasattr(obj, '_mock_return_value')
+
+
 def get_context_cutoff_date(dt_kyiv: datetime | None = None):
     """Визначає граничну дату для зберігання контексту повідомлень за київським часом:
     - Контекст сьогодні формується з 00:00 (12 ночі).
@@ -83,6 +88,54 @@ def extract_energy_schedule(text: str) -> str | None:
     # Нормалізуємо час: розділювач годин записуємо через дефіс/тире з пробілами (наприклад: 19:00 – 22:30)
     raw_val = re.sub(r'(\b\d{1,2}:\d{2})\s*[:\-–—]\s*(\d{1,2}:\d{2}\b)', r'\1 – \2', raw_val)
     return raw_val
+
+
+UKRAINIAN_MONTHS = {
+    'січня': 1, 'лютого': 2, 'березня': 3, 'квітня': 4,
+    'травня': 5, 'червня': 6, 'липня': 7, 'серпня': 8,
+    'вересня': 9, 'жовтня': 10, 'листопада': 11, 'грудня': 12
+}
+
+
+def parse_energy_target_date(text: str, msg_datetime: datetime | None = None):
+    """Визначає цільову дату, для якої призначено графік відключень (з тексту або дати повідомлення)."""
+    if not text:
+        return None
+    ref_date = msg_datetime.date() if msg_datetime else datetime.now(KYIV_TZ).date()
+    m = re.search(r'\b(\d{1,2})\s+(січня|лютого|березня|квітня|травня|червня|липня|серпня|вересня|жовтня|листопада|грудня)\b', text, re.IGNORECASE)
+    if m:
+        day = int(m.group(1))
+        month = UKRAINIAN_MONTHS[m.group(2).lower()]
+        year = ref_date.year
+        if month == 1 and ref_date.month == 12:
+            year += 1
+        elif month == 12 and ref_date.month == 1:
+            year -= 1
+        try:
+            from datetime import date
+            return date(year, month, day)
+        except ValueError:
+            pass
+    if 'сьогодні' in text.lower():
+        return ref_date
+    if 'завтра' in text.lower():
+        return ref_date + timedelta(days=1)
+    return ref_date
+
+
+def get_earliest_outage_time(schedule_str: str):
+    """Повертає найраніший час початку відключення (datetime.time) з рядка графіка."""
+    if not schedule_str:
+        return None
+    from datetime import time
+    intervals = [i.strip() for i in schedule_str.split(';') if i.strip()]
+    times = []
+    for inter in intervals:
+        m = re.search(r'(\d{1,2}):(\d{2})', inter)
+        if m:
+            h, mn = int(m.group(1)), int(m.group(2))
+            times.append(time(h, mn))
+    return min(times) if times else None
 
 
 def format_energy_message(schedule_time: str) -> str:
@@ -156,8 +209,10 @@ class UtilityMonitor:
         self.water_accumulated_locations = set()
         self.water_has_yellow = False
 
-        # Відстеження повідомлень Харківобленерго (дедуплікація та оновлення): {msg_id: {"sent_msg_id": int, "schedule": str, "timestamp": float}}
-        self.energy_posts = {}
+        # Відстеження повідомлень та розкладів Харківобленерго:
+        # {msg_id: {"msg_id": int, "schedule": str, "target_date": date, "msg_date": date, "earliest_time": time, "sent_checkpoints": set(), "sent_msg_ids": list}}
+        self.energy_schedules = {}
+        self.energy_posts = self.energy_schedules
 
         # Контекст повідомлень у чатах: [{"date": datetime, "chat": str, "text": str}]
         self.daily_context = []
@@ -201,65 +256,178 @@ class UtilityMonitor:
             logger.debug(f"⚡ [Харківобленерго] Повідомлення {msg_id} не містить відключення черги 1.1")
             return
             
-        outage_text = format_energy_message(schedule)
-        now_ts = time.time()
+        raw_date = getattr(event_or_msg, "date", None)
+        msg_dt = to_kyiv_datetime(raw_date) if is_valid_datetime(raw_date) else datetime.now(KYIV_TZ)
+        target_date = parse_energy_target_date(text, msg_dt) or msg_dt.date()
+        earliest_time = get_earliest_outage_time(schedule)
         
-        # 1. Перевірка: чи цей пост уже оброблявся в пам'яті
-        existing = self.energy_posts.get(msg_id)
-        if existing:
-            if existing.get("schedule") == schedule:
-                logger.info(f"⚡ [Харківобленерго] Дублікат для {msg_id} (графік без змін: {schedule})")
-                return
-            else:
-                # Графік оновився в каналі Харківобленерго! Редагуємо повідомлення в каналі
+        entry = self.energy_schedules.get(msg_id)
+        if not entry:
+            entry = {
+                "msg_id": msg_id,
+                "schedule": schedule,
+                "target_date": target_date,
+                "msg_date": msg_dt.date(),
+                "earliest_time": earliest_time,
+                "sent_checkpoints": set(),
+                "sent_msg_ids": [],
+            }
+            self.energy_schedules[msg_id] = entry
+        else:
+            if entry.get("schedule") != schedule:
+                # Графік оновився в каналі Харківобленерго! Редагуємо надіслані повідомлення
                 target_chat_id = TELEGRAM_CHAT_ID or os.environ.get("TELEGRAM_CHAT_ID", "")
-                sent_msg_id = existing.get("sent_msg_id")
-                if sent_msg_id and self.light_bot and target_chat_id:
-                    try:
-                        await self.light_bot.edit_message_text(
-                            chat_id=target_chat_id,
-                            message_id=sent_msg_id,
-                            text=outage_text
-                        )
-                        existing["schedule"] = schedule
-                        existing["timestamp"] = now_ts
-                        logger.info(f"⚡ [Харківобленерго] Відредаговано повідомлення в каналі (пост {msg_id}): {outage_text}")
-                        return
-                    except Exception as e:
-                        logger.warning(f"Не вдалося відредагувати повідомлення {sent_msg_id}: {e}")
-        
-        # 2. Безстанова перевірка (Stateless Deduplication):
-        # Якщо бот перезапустився, перевіримо останні повідомлення в каналі
+                outage_text = format_energy_message(schedule)
+                for sent_msg_id in entry.get("sent_msg_ids", []):
+                    if sent_msg_id and self.light_bot and target_chat_id:
+                        try:
+                            await self.light_bot.edit_message_text(
+                                chat_id=target_chat_id,
+                                message_id=sent_msg_id,
+                                text=outage_text
+                            )
+                            logger.info(f"⚡ [Харківобленерго] Відредаговано повідомлення в каналі (пост {msg_id}, msg_id {sent_msg_id}): {outage_text}")
+                        except Exception as e:
+                            logger.warning(f"Не вдалося відредагувати повідомлення {sent_msg_id}: {e}")
+                entry["schedule"] = schedule
+                entry["earliest_time"] = earliest_time
+
+        await self._process_energy_schedule_entry(entry)
+
+    async def _process_energy_schedule_entry(self, entry):
+        """Перевіряє та публікує повідомлення за трьома чекпоінтами:
+        1. 'announced': у день анонсу (сьогодні).
+        2. 'morning_08': вранці наступного дня о 08:00 (до відключення).
+        3. 'one_hour_before': за 1 годину до початку відключення.
+        Використовує безстанову дедуплікацію по історії каналу (stateless dedup),
+        щоб перезапуск бота ніколи не викликав дублювання повідомлень.
+        """
         target_chat_id = TELEGRAM_CHAT_ID or os.environ.get("TELEGRAM_CHAT_ID", "")
+        if not self.light_bot or not target_chat_id:
+            return
+
+        schedule = entry["schedule"]
+        target_date = entry["target_date"]
+        msg_date = entry["msg_date"]
+        earliest_time = entry["earliest_time"]
+        outage_text = format_energy_message(schedule)
+        
+        now_kyiv = datetime.now(KYIV_TZ)
+        today = now_kyiv.date()
+        
+        from datetime import time
+        if earliest_time:
+            if hasattr(KYIV_TZ, "localize"):
+                outage_start_dt = KYIV_TZ.localize(datetime.combine(target_date, earliest_time))
+            else:
+                outage_start_dt = datetime.combine(target_date, earliest_time, tzinfo=KYIV_TZ)
+            one_hour_before_dt = outage_start_dt - timedelta(hours=1)
+        else:
+            outage_start_dt = None
+            one_hour_before_dt = None
+
+        # Отримуємо історію каналу для безстанової дедуплікації (до 40 останніх повідомлень)
+        channel_matches = []
         try:
-            if target_chat_id:
-                async for past_msg in self.client.iter_messages(int(target_chat_id), limit=20):
-                    if past_msg.text and outage_text.strip() in past_msg.text.strip():
-                        logger.info(f"⚡ [Харківобленерго] Повідомлення вже є в каналі: {outage_text}")
-                        self.energy_posts[msg_id] = {
-                            "sent_msg_id": past_msg.id,
-                            "schedule": schedule,
-                            "timestamp": now_ts
-                        }
-                        return
+            async for past_msg in self.client.iter_messages(int(target_chat_id), limit=40):
+                if past_msg.text and outage_text.strip() in past_msg.text.strip():
+                    p_raw = getattr(past_msg, "date", None)
+                    p_dt = to_kyiv_datetime(p_raw) if is_valid_datetime(p_raw) else now_kyiv
+                    channel_matches.append((p_dt, past_msg.id))
         except Exception as e:
             logger.debug(f"Stateless dedup error (energy): {e}")
-            
-        # 3. Публікація нового повідомлення в цільовий канал
-        if self.light_bot and target_chat_id:
-            try:
-                sent = await self.light_bot.send_message(
-                    chat_id=target_chat_id,
-                    text=outage_text
-                )
-                self.energy_posts[msg_id] = {
-                    "sent_msg_id": getattr(sent, "message_id", None),
-                    "schedule": schedule,
-                    "timestamp": now_ts
-                }
-                logger.info(f"💡 [Харківобленерго] Опубліковано графік світла для Берестина: {outage_text}")
-            except Exception as e:
-                logger.error(f"Помилка відправки повідомлення Харківобленерго: {e}")
+
+        # Зберігаємо ID наявних повідомлень з каналу, щоб мати змогу редагувати при оновленні графіка
+        for _, p_id in channel_matches:
+            if p_id not in entry["sent_msg_ids"]:
+                entry["sent_msg_ids"].append(p_id)
+                if not entry.get("sent_msg_id"):
+                    entry["sent_msg_id"] = p_id
+
+        def count_posts_on(d, min_t=None, max_t=None):
+            cnt = 0
+            for p_dt, _ in channel_matches:
+                if p_dt.date() == d:
+                    if min_t and p_dt.time() < min_t:
+                        continue
+                    if max_t and p_dt.time() > max_t:
+                        continue
+                    cnt += 1
+            return cnt
+
+        # 1. Чекпоінт: "announced" (в день появи повідомлення)
+        if today <= msg_date and "announced" not in entry["sent_checkpoints"]:
+            if count_posts_on(msg_date) == 0:
+                try:
+                    sent = await self.light_bot.send_message(chat_id=target_chat_id, text=outage_text)
+                    entry["sent_checkpoints"].add("announced")
+                    s_id = getattr(sent, "message_id", None)
+                    if s_id:
+                        entry["sent_msg_ids"].append(s_id)
+                        entry["sent_msg_id"] = s_id
+                    logger.info(f"💡 [Харківобленерго] Опубліковано анонс графіка світла для Берестина: {outage_text}")
+                except Exception as e:
+                    logger.error(f"Помилка відправки анонсу графіка: {e}")
+            else:
+                entry["sent_checkpoints"].add("announced")
+
+        # Чекпоінти у день відключення (target_date)
+        if today == target_date:
+            # 2. Чекпоінт: "morning_08" (вранці о 08:00 наступного дня)
+            # Застосовується, якщо графік було опубліковано заздалегідь (target_date > msg_date),
+            # відключення стартує після 08:30, поточний час між 08:00 та 10:00 і відключення ще не почалося
+            if (target_date > msg_date and earliest_time and earliest_time > time(8, 30)
+                    and time(8, 0) <= now_kyiv.time() < time(10, 0)
+                    and outage_start_dt and now_kyiv < outage_start_dt):
+                if "morning_08" not in entry["sent_checkpoints"]:
+                    if count_posts_on(target_date, max_t=time(10, 0)) == 0:
+                        try:
+                            sent = await self.light_bot.send_message(chat_id=target_chat_id, text=outage_text)
+                            entry["sent_checkpoints"].add("morning_08")
+                            s_id = getattr(sent, "message_id", None)
+                            if s_id:
+                                entry["sent_msg_ids"].append(s_id)
+                                entry["sent_msg_id"] = s_id
+                            logger.info(f"💡 [Харківобленерго] Опубліковано ранкове нагадування (08:00): {outage_text}")
+                        except Exception as e:
+                            logger.error(f"Помилка відправки ранкового нагадування: {e}")
+                    else:
+                        entry["sent_checkpoints"].add("morning_08")
+
+            # 3. Чекпоінт: "one_hour_before" (повторно за 1 годину до початку відключення)
+            if outage_start_dt and one_hour_before_dt and now_kyiv >= one_hour_before_dt and now_kyiv < outage_start_dt:
+                if "one_hour_before" not in entry["sent_checkpoints"]:
+                    # Перевіряємо, чи повідомлення вже публікувалось у вікні за 90 хв до старту
+                    already_sent_pre = any(
+                        p_dt.date() == target_date and (outage_start_dt - timedelta(minutes=90)) <= p_dt <= outage_start_dt
+                        for p_dt, _ in channel_matches
+                    )
+                    # Захист від спаму: якщо будь-яке нагадування з цим текстом було менше ніж 50 хв тому
+                    too_recent = any(
+                        p_dt.date() == target_date and (now_kyiv - p_dt).total_seconds() < 3000
+                        for p_dt, _ in channel_matches
+                    )
+                    if not already_sent_pre and not too_recent:
+                        try:
+                            sent = await self.light_bot.send_message(chat_id=target_chat_id, text=outage_text)
+                            entry["sent_checkpoints"].add("one_hour_before")
+                            s_id = getattr(sent, "message_id", None)
+                            if s_id:
+                                entry["sent_msg_ids"].append(s_id)
+                                entry["sent_msg_id"] = s_id
+                            logger.info(f"💡 [Харківобленерго] Опубліковано нагадування за 1 годину до відключення: {outage_text}")
+                        except Exception as e:
+                            logger.error(f"Помилка відправки нагадування за 1 годину: {e}")
+                    else:
+                        entry["sent_checkpoints"].add("one_hour_before")
+
+    async def _check_pending_energy_schedules(self):
+        """Періодично перевіряє всі активні розклади на настання часу публікації (08:00 або за 1 год до відключення)."""
+        now_date = datetime.now(KYIV_TZ).date()
+        for msg_id, entry in list(self.energy_schedules.items()):
+            if entry["target_date"] < now_date - timedelta(days=1):
+                continue
+            await self._process_energy_schedule_entry(entry)
 
     def _format_status_message(self, clean_text: str) -> str:
         """Перетворює текст в список з булітами."""
@@ -382,6 +550,12 @@ class UtilityMonitor:
                         await self._handle_energy_message(m)
                 except Exception as pe:
                     logger.debug(f"Energy periodic check: {pe}")
+
+            # Перевірка та публікація розкладів Харківобленерго (о 08:00 та за 1 годину до відключення)
+            try:
+                await self._check_pending_energy_schedules()
+            except Exception as se:
+                logger.error(f"Помилка перевірки розкладу Харківобленерго: {se}")
             
             now_ts = time.time()
             
@@ -620,24 +794,18 @@ class UtilityMonitor:
         logger.info(f"⚡ Офіційний канал енерго: @{ENERGY_CHANNEL}")
         logger.info("=" * 50)
         
-        # Підписка на канал Харківобленерго (при старті нічого не публікуємо)
+        # Підписка на канал Харківобленерго та завантаження розкладів за останні 48 год
         try:
             from telethon.tl.functions.channels import JoinChannelRequest
             try:
                 await self.client(JoinChannelRequest(ENERGY_CHANNEL))
             except Exception:
                 pass
-            # Фіксуємо останній пост у пам'яті без надсилання, щоб не публікувати при перезапуску
-            msgs = await self.client.get_messages(ENERGY_CHANNEL, limit=3)
-            for m in msgs:
-                if m and m.raw_text:
-                    sched = extract_energy_schedule(m.raw_text)
-                    if sched:
-                        self.energy_posts[m.id] = {
-                            "sent_msg_id": None,
-                            "schedule": sched,
-                            "timestamp": time.time()
-                        }
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
+            msgs = await self.client.get_messages(ENERGY_CHANNEL, limit=10)
+            for m in reversed(msgs):
+                if m and m.date and m.date >= cutoff:
+                    await self._handle_energy_message(m)
         except Exception as e:
             logger.warning(f"Канал @{ENERGY_CHANNEL} init: {e}")
 

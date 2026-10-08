@@ -32,9 +32,13 @@ if not os.environ.get("TELEGRAM_CHAT_ID"):
 from utility_bot import (
     extract_energy_schedule,
     format_energy_message,
+    parse_energy_target_date,
+    get_earliest_outage_time,
     UtilityMonitor,
     ENERGY_CHANNEL,
     ENERGY_CHANNEL_IDS,
+    to_kyiv_datetime,
+    KYIV_TZ,
 )
 
 print("=" * 70)
@@ -217,6 +221,173 @@ async def run_lifecycle_simulation():
                 mock_light_bot.send_message.call_count == 0)
 
 asyncio.run(run_lifecycle_simulation())
+
+# ==============================================================================
+# БЛОК 4: ГРАФІК ВІДКЛЮЧЕНЬ НА НАСТУПНИЙ ДЕНЬ (MULTI-CHECKPOINT LIFECYCLE)
+# ==============================================================================
+print("\n[БЛОК 4] ⏰ Публікація графіка на наступний день (анонс + 08:00 ранку + за 1 год до відключення)")
+
+from datetime import datetime, date, time, timedelta
+
+# 4.1 Тестування витягу цільових дат
+msg_2195_text = """‼️⚡️ За вказівкою НЕК "Укренерго" у четвер, 8 жовтня, з 00:00 до 23:59 у Харківській області будуть діяти графіки погодинних відключень (ГПВ). 
+1.1 13:00-16:30"""
+
+msg_2193_text = """‼️⚡️ у середу, 7 жовтня, з 00:00 до 23:59 будуть діяти ГПВ... 1.1 16:00-19:30"""
+
+t_date_2195 = parse_energy_target_date(msg_2195_text, datetime(2026, 10, 7, 18, 33))
+assert_test("4.1 Парсинг цільової дати з повідомлення 2195 ('8 жовтня')", t_date_2195 == date(2026, 10, 8), f"Отримано: {t_date_2195}")
+
+t_date_2193 = parse_energy_target_date(msg_2193_text, datetime(2026, 10, 6, 23, 18))
+assert_test("4.2 Парсинг цільової дати з повідомлення 2193 ('7 жовтня')", t_date_2193 == date(2026, 10, 7), f"Отримано: {t_date_2193}")
+
+# 4.2 Тестування витягу найранішого часу
+e_time_2195 = get_earliest_outage_time("13:00 – 16:30")
+assert_test("4.3 Найраніший час відключення для 13:00 – 16:30 (13:00)", e_time_2195 == time(13, 0), f"Отримано: {e_time_2195}")
+
+e_time_multi = get_earliest_outage_time("07:00 – 09:30; 16:30 – 20:00")
+assert_test("4.4 Найраніший час для кількох інтервалів (07:00)", e_time_multi == time(7, 0), f"Отримано: {e_time_multi}")
+
+async def run_next_day_lifecycle_simulation():
+    mock_client = MagicMock()
+    mock_light_bot = AsyncMock()
+    mock_sent_msg = MagicMock()
+    mock_sent_msg.message_id = 99001
+    mock_light_bot.send_message.return_value = mock_sent_msg
+
+    # Канал повідомлень у Telegram
+    channel_history = []  # list of MockMessage
+
+    async def mock_iter(*args, **kwargs):
+        for msg in reversed(channel_history):
+            yield msg
+
+    mock_client.iter_messages = mock_iter
+
+    # Створюємо монітор
+    monitor = UtilityMonitor(mock_client)
+    monitor.light_bot = mock_light_bot
+
+    # Подія 2195: надходить 7 жовтня о 18:33 (на 8 жовтня 13:00 - 16:30)
+    event_2195 = MagicMock()
+    event_2195.id = 2195
+    event_2195.raw_text = msg_2195_text
+    event_2195.date = KYIV_TZ.localize(datetime(2026, 10, 7, 18, 33))
+    chat_mock = MagicMock()
+    chat_mock.username = "kharkivenergy"
+    chat_mock.title = "Харківобленерго Новини"
+    event_2195.get_chat = AsyncMock(return_value=chat_mock)
+
+    # 1. Симуляція часу: 7 жовтня 18:33 (в день появи посту)
+    # Підміняємо datetime.now у модулі utility_bot на час анонсу
+    import utility_bot
+    original_now = utility_bot.datetime
+
+    class FakeDatetime(datetime):
+        _current_time = KYIV_TZ.localize(datetime(2026, 10, 7, 18, 33))
+        @classmethod
+        def now(cls, tz=None):
+            return cls._current_time
+
+    utility_bot.datetime = FakeDatetime
+
+    try:
+        # 4.5 Чекпоінт 1: публікація анонсу в поточний день (7 жовтня)
+        await monitor._handle_energy_message(event_2195)
+        assert_test("4.5 Анонс графіка відправлено в день публікації (7 жовтня)", 
+                    mock_light_bot.send_message.call_count == 1)
+
+        # Фіксуємо опублікований анонс в історії каналу
+        msg_announced = MagicMock()
+        msg_announced.id = 99001
+        msg_announced.date = KYIV_TZ.localize(datetime(2026, 10, 7, 18, 33))
+        msg_announced.text = format_energy_message("13:00 – 16:30")
+        channel_history.append(msg_announced)
+
+        # 4.6 Перезапуск бота 7 жовтня ввечері (о 21:00)
+        FakeDatetime._current_time = KYIV_TZ.localize(datetime(2026, 10, 7, 21, 0))
+        restarted_monitor = UtilityMonitor(mock_client)
+        restarted_monitor.light_bot = mock_light_bot
+        mock_light_bot.send_message.reset_mock()
+
+        await restarted_monitor._handle_energy_message(event_2195)
+        assert_test("4.6 Stateless Dedup: перезапуск ввечері 7 жовтня НЕ дублює анонс", 
+                    mock_light_bot.send_message.call_count == 0)
+
+        # 4.7 Настав ранок 8 жовтня (07:00 - до 08:00)
+        FakeDatetime._current_time = KYIV_TZ.localize(datetime(2026, 10, 8, 7, 0))
+        await restarted_monitor._check_pending_energy_schedules()
+        assert_test("4.7 О 07:00 ранку повідомлення ще НЕ відправляється (чекає 08:00)", 
+                    mock_light_bot.send_message.call_count == 0)
+
+        # 4.8 Настала 08:00 ранку 8 жовтня (Чекпоінт 2: morning_08)
+        FakeDatetime._current_time = KYIV_TZ.localize(datetime(2026, 10, 8, 8, 0))
+        mock_sent_morning = MagicMock()
+        mock_sent_morning.message_id = 99002
+        mock_light_bot.send_message.return_value = mock_sent_morning
+
+        await restarted_monitor._check_pending_energy_schedules()
+        assert_test("4.8 О 08:00 ранку надіслано ранкове нагадування (Чекпоінт 2)", 
+                    mock_light_bot.send_message.call_count == 1)
+
+        msg_morning = MagicMock()
+        msg_morning.id = 99002
+        msg_morning.date = KYIV_TZ.localize(datetime(2026, 10, 8, 8, 0))
+        msg_morning.text = format_energy_message("13:00 – 16:30")
+        channel_history.append(msg_morning)
+
+        # 4.9 Перезапуск бота о 09:00 (Stateless Dedup для ранкового повідомлення)
+        FakeDatetime._current_time = KYIV_TZ.localize(datetime(2026, 10, 8, 9, 0))
+        restarted_morning_monitor = UtilityMonitor(mock_client)
+        restarted_morning_monitor.light_bot = mock_light_bot
+        mock_light_bot.send_message.reset_mock()
+
+        await restarted_morning_monitor._handle_energy_message(event_2195)
+        assert_test("4.9 Stateless Dedup: перезапуск о 09:00 НЕ дублює ранкове нагадування", 
+                    mock_light_bot.send_message.call_count == 0)
+
+        # 4.10 Час 11:30 (до 1-годинного вікна перед відключенням 13:00)
+        FakeDatetime._current_time = KYIV_TZ.localize(datetime(2026, 10, 8, 11, 30))
+        await restarted_morning_monitor._check_pending_energy_schedules()
+        assert_test("4.10 Об 11:30 повідомлення ще НЕ відправляється (чекає 12:00)", 
+                    mock_light_bot.send_message.call_count == 0)
+
+        # 4.11 Настала 12:00 (Чекпоінт 3: рівно за 1 годину до відключення о 13:00)
+        FakeDatetime._current_time = KYIV_TZ.localize(datetime(2026, 10, 8, 12, 0))
+        mock_sent_pre = MagicMock()
+        mock_sent_pre.message_id = 99003
+        mock_light_bot.send_message.return_value = mock_sent_pre
+
+        await restarted_morning_monitor._check_pending_energy_schedules()
+        assert_test("4.11 О 12:00 надіслано нагадування за 1 годину до відключення (Чекпоінт 3)", 
+                    mock_light_bot.send_message.call_count == 1)
+
+        msg_pre = MagicMock()
+        msg_pre.id = 99003
+        msg_pre.date = KYIV_TZ.localize(datetime(2026, 10, 8, 12, 0))
+        msg_pre.text = format_energy_message("13:00 – 16:30")
+        channel_history.append(msg_pre)
+
+        # 4.12 Перезапуск бота о 12:30 (Stateless Dedup для 1-годинного нагадування)
+        FakeDatetime._current_time = KYIV_TZ.localize(datetime(2026, 10, 8, 12, 30))
+        restarted_pre_monitor = UtilityMonitor(mock_client)
+        restarted_pre_monitor.light_bot = mock_light_bot
+        mock_light_bot.send_message.reset_mock()
+
+        await restarted_pre_monitor._handle_energy_message(event_2195)
+        assert_test("4.12 Stateless Dedup: перезапуск о 12:30 НЕ дублює повідомлення", 
+                    mock_light_bot.send_message.call_count == 0)
+
+        # 4.13 Після настання 13:00 (відключення вже почалося)
+        FakeDatetime._current_time = KYIV_TZ.localize(datetime(2026, 10, 8, 13, 15))
+        await restarted_pre_monitor._check_pending_energy_schedules()
+        assert_test("4.13 Після початку відключення (13:15) жодних повідомлень більше НЕ надсилається", 
+                    mock_light_bot.send_message.call_count == 0)
+
+    finally:
+        utility_bot.datetime = original_now
+
+asyncio.run(run_next_day_lifecycle_simulation())
 
 print("\n" + "=" * 70)
 print(f"📊 РЕЗУЛЬТАТ СИМУЛЯЦІЇ: {passed}/{total} тестів пройдено успішно ({passed/total*100:.1f}%)")
