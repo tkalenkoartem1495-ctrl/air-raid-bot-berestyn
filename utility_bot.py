@@ -180,8 +180,23 @@ def is_time_in_schedule(t, schedule_str: str) -> bool:
     return is_time_in_intervals(t, intervals)
 
 
-def format_energy_message(schedule_time: str) -> str:
-    """Форматує офіційне повідомлення про відключення світла для Берестина."""
+MONTH_NAMES_GENITIVE = {
+    1: 'січня', 2: 'лютого', 3: 'березня', 4: 'квітня',
+    5: 'травня', 6: 'червня', 7: 'липня', 8: 'серпня',
+    9: 'вересня', 10: 'жовтня', 11: 'листопада', 12: 'грудня'
+}
+
+
+def format_energy_message(schedule_time: str, target_date=None) -> str:
+    """Форматує офіційне повідомлення про відключення світла для Берестина разом з датою."""
+    if target_date:
+        d = getattr(target_date, 'day', None)
+        m_num = getattr(target_date, 'month', None)
+        if d and m_num:
+            m_str = MONTH_NAMES_GENITIVE.get(m_num, '')
+            date_str = f"{d} {m_str}".strip()
+            if date_str:
+                return f"Згідно інформації Харківобленерго, {date_str} у Берестині планується відключення світла: {schedule_time}"
     return f"Згідно інформації Харківобленерго, у Берестині планується відключення світла: {schedule_time}"
 
 
@@ -319,7 +334,7 @@ class UtilityMonitor:
             if entry.get("schedule") != schedule:
                 # Графік оновився в каналі Харківобленерго! Редагуємо надіслані повідомлення
                 target_chat_id = TELEGRAM_CHAT_ID or os.environ.get("TELEGRAM_CHAT_ID", "")
-                outage_text = format_energy_message(schedule)
+                outage_text = format_energy_message(schedule, entry.get("target_date"))
                 for sent_msg_id in entry.get("sent_msg_ids", []):
                     if sent_msg_id and self.light_bot and target_chat_id:
                         try:
@@ -352,7 +367,7 @@ class UtilityMonitor:
         target_date = entry["target_date"]
         msg_date = entry["msg_date"]
         earliest_time = entry["earliest_time"]
-        outage_text = format_energy_message(schedule)
+        outage_text = format_energy_message(schedule, target_date)
         
         now_kyiv = datetime.now(KYIV_TZ)
         today = now_kyiv.date()
@@ -372,7 +387,21 @@ class UtilityMonitor:
         channel_matches = []
         try:
             async for past_msg in self.client.iter_messages(int(target_chat_id), limit=40):
-                if past_msg.text and outage_text.strip() in past_msg.text.strip():
+                if not past_msg.text:
+                    continue
+                p_text = past_msg.text.strip()
+                matches_exact = outage_text.strip() in p_text
+                d_str = f"{target_date.day} {MONTH_NAMES_GENITIVE.get(target_date.month, '')}" if target_date else ""
+                matches_compat = (
+                    "харківобленерго" in p_text.lower()
+                    and "відключення світла" in p_text.lower()
+                    and schedule in p_text
+                    and (
+                        (d_str and d_str in p_text)
+                        or (past_msg.date and to_kyiv_datetime(past_msg.date).date() == target_date)
+                    )
+                )
+                if matches_exact or matches_compat:
                     p_raw = getattr(past_msg, "date", None)
                     p_dt = to_kyiv_datetime(p_raw) if is_valid_datetime(p_raw) else now_kyiv
                     channel_matches.append((p_dt, past_msg.id))

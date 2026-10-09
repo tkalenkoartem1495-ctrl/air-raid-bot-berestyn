@@ -13,6 +13,7 @@ import os
 import re
 import asyncio
 from unittest.mock import MagicMock, AsyncMock
+from datetime import datetime, date, time, timedelta
 
 # Add current dir to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -81,11 +82,13 @@ msg_2189 = """‼️⚡️ За вказівкою НЕК "Укренерго" �
 ➡️ ДЛЯ ПРОМИСЛОВОСТІ ТА БІЗНЕСУ з 15:00 до 24:00 діятимуть графіки обмеження потужності (ГОП)."""
 
 res_2189 = extract_energy_schedule(msg_2189)
-formatted_2189 = format_energy_message(res_2189) if res_2189 else ""
-expected_2189 = "Згідно інформації Харківобленерго, у Берестині планується відключення світла: 19:00 – 22:30"
+target_date_2189 = parse_energy_target_date(msg_2189, datetime(2026, 10, 6, 12, 0))
+formatted_2189 = format_energy_message(res_2189, target_date_2189) if res_2189 else ""
+expected_2189 = "Згідно інформації Харківобленерго, 6 жовтня у Берестині планується відключення світла: 19:00 – 22:30"
 
 assert_test("1.1 Витяг часу з повідомлення 2189 ('19:00 – 22:30')", res_2189 == "19:00 – 22:30", f"Отримано: {res_2189}")
-assert_test("1.2 Точна відповідність зразку користувача для 2189", formatted_2189 == expected_2189, f"Отримано: '{formatted_2189}' != '{expected_2189}'")
+assert_test("1.2 Точна відповідність зразку користувача для 2189 з датою", formatted_2189 == expected_2189, f"Отримано: '{formatted_2189}' != '{expected_2189}'")
+assert_test("1.2b Фолбек форматування без дати", format_energy_message(res_2189) == "Згідно інформації Харківобленерго, у Берестині планується відключення світла: 19:00 – 22:30")
 
 # 1.2 Реальне повідомлення 2031 (1 липня)
 msg_2031 = """‼️ ⚡️ За вказівкою НЕК "Укренерго" у зв'язку зі складною ситуацією в Об’єднаній енергосистемі, сьогодні, 1 липня, з 17:00 до 22:00 у Харківській області будуть діяти графіки погодинних відключень (ГПВ).
@@ -213,6 +216,7 @@ async def run_lifecycle_simulation():
     past_msg_in_channel = MagicMock()
     past_msg_in_channel.id = 88888
     past_msg_in_channel.text = expected_2189
+    past_msg_in_channel.date = datetime.now(KYIV_TZ)
 
     async def mock_iter(*args, **kwargs):
         yield past_msg_in_channel
@@ -304,7 +308,7 @@ async def run_next_day_lifecycle_simulation():
         msg_announced = MagicMock()
         msg_announced.id = 99001
         msg_announced.date = KYIV_TZ.localize(datetime(2026, 10, 7, 18, 33))
-        msg_announced.text = format_energy_message("13:00 – 16:30")
+        msg_announced.text = format_energy_message("13:00 – 16:30", t_date_2195)
         channel_history.append(msg_announced)
 
         # 4.6 Перезапуск бота 7 жовтня ввечері (о 21:00)
@@ -336,7 +340,7 @@ async def run_next_day_lifecycle_simulation():
         msg_morning = MagicMock()
         msg_morning.id = 99002
         msg_morning.date = KYIV_TZ.localize(datetime(2026, 10, 8, 8, 0))
-        msg_morning.text = format_energy_message("13:00 – 16:30")
+        msg_morning.text = format_energy_message("13:00 – 16:30", t_date_2195)
         channel_history.append(msg_morning)
 
         # 4.9 Перезапуск бота о 09:00 (Stateless Dedup для ранкового повідомлення)
@@ -368,7 +372,7 @@ async def run_next_day_lifecycle_simulation():
         msg_pre = MagicMock()
         msg_pre.id = 99003
         msg_pre.date = KYIV_TZ.localize(datetime(2026, 10, 8, 12, 0))
-        msg_pre.text = format_energy_message("13:00 – 16:30")
+        msg_pre.text = format_energy_message("13:00 – 16:30", t_date_2195)
         channel_history.append(msg_pre)
 
         # 4.12 Перезапуск бота о 12:30 (Stateless Dedup для 1-годинного нагадування)
