@@ -197,10 +197,16 @@ class DawnBot:
         if not generated_text:
             import random
             generated_text = random.choice(FALLBACK_GREETINGS)
+            if history_fact:
+                generated_text += f"\n\n📜 {history_fact}"
+        elif history_fact:
+            # Якщо Gemini генерував текст, він уже включає історичний факт за інструкцією в промпті.
+            # Додаємо факт лише якщо Gemini взагалі не згадав історію (страховка).
+            fact_kw = history_fact[:30].lower()
+            if fact_kw not in generated_text.lower() and "історії" not in generated_text.lower():
+                generated_text += f"\n\n📜 {history_fact}"
             
         final_message = generated_text
-        if history_fact:
-            final_message += f"\n\n{history_fact}"
             
         try:
             await self.bot.send_message(
@@ -213,6 +219,17 @@ class DawnBot:
             self.last_posted_date = date_key
         except Exception as e:
             logger.error(f"Помилка відправки в Telegram (DawnBot): {e}")
+            try:
+                # Фолбек без parse_mode у разі помилки валідації HTML тегів
+                await self.bot.send_message(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    text=final_message,
+                    disable_web_page_preview=True
+                )
+                logger.info("✅ Ранковий пост успішно опубліковано (без parse_mode)!")
+                self.last_posted_date = date_key
+            except Exception as e2:
+                logger.error(f"Критична помилка відправки в Telegram (DawnBot fallback): {e2}")
 
     async def _scheduler_loop(self):
         """Фонова задача для перевірки часу та публікації посту."""

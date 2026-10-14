@@ -193,6 +193,96 @@ assert_test("6.1 Наявність пулу резервних привітан
 assert_test("6.2 Всі резервні привітання українською мовою та містять 'Берестин'/'місто'", 
             all("берестин" in g.lower() or "місто" in g.lower() for g in FALLBACK_GREETINGS))
 
+# 6.3 Завантаження історичних фактів з history.json для дати 10-14
+fact_10_14 = dawn_bot.history.get("10-14")
+assert_test("6.3 Коректне завантаження факту на 14 жовтня з history.json",
+            fact_10_14 is not None and "14 жовтня" in fact_10_14 and "УПА" in fact_10_14)
+
+# 6.4 Симуляція: Gemini згенерував пост із фактом — захист від дублювання в кінці
+sample_gemini_post = (
+    "🌅 Доброго ранку, Берестин!\n\n"
+    "Сьогодні вівторок, 14 жовтня. Осінь впевнено панує за вікном. Бажаємо тепла та затишку! ☕️🍂\n\n"
+    "🌤 Погода: мінлива хмарність, температура до +13°C. Вітер помірний.\n\n"
+    "📜 Цей день в історії: 14 жовтня 1942 року вважається офіційною датою створення Української повстанської армії (УПА).\n\n"
+    "Гарного дня! ☕️🇺🇦"
+)
+
+def format_dawn_message(generated_text, history_fact):
+    if not generated_text:
+        import random
+        generated_text = random.choice(FALLBACK_GREETINGS)
+        if history_fact:
+            generated_text += f"\n\n📜 {history_fact}"
+    elif history_fact:
+        fact_kw = history_fact[:30].lower()
+        if fact_kw not in generated_text.lower() and "історії" not in generated_text.lower():
+            generated_text += f"\n\n📜 {history_fact}"
+    return generated_text
+
+res_with_fact_in_body = format_dawn_message(sample_gemini_post, fact_10_14)
+count_fact = res_with_fact_in_body.count("14 жовтня 1942 року")
+assert_test("6.4 Захист від дублікату: факт зустрічається рівно 1 раз у пості", count_fact == 1)
+assert_test("6.5 Пост закінчується на 'Гарного дня! ☕️🇺🇦', а не на сирий факт", res_with_fact_in_body.strip().endswith("Гарного дня! ☕️🇺🇦"))
+
+# 6.6 Симуляція: Gemini згенерував текст, але пропустив історичний факт (страховка)
+sample_gemini_no_fact = (
+    "🌅 Доброго ранку, незламний Берестин!\n\n"
+    "🌤 Погода чудова, сонячно і тепло.\n\n"
+    "Гарного дня! ☕️🇺🇦"
+)
+res_fact_missing = format_dawn_message(sample_gemini_no_fact, fact_10_14)
+assert_test("6.6 Страховка: факт додається, якщо Gemini його повністю пропустив",
+            "14 жовтня 1942 року" in res_fact_missing and res_fact_missing.count("14 жовтня 1942 року") == 1)
+
+# 6.7 Симуляція збою Gemini (fallback greeting + факт)
+res_gemini_fail = format_dawn_message("", fact_10_14)
+assert_test("6.7 Резервний режим при збої AI містить вітання та історичний факт",
+            any(g in res_gemini_fail for g in FALLBACK_GREETINGS) and "14 жовтня 1942 року" in res_gemini_fail)
+
+# 6.8 День без історичного факту
+res_no_fact_day = format_dawn_message(sample_gemini_no_fact, None)
+assert_test("6.8 День без факту не додає зайвих блоків",
+            res_no_fact_day == sample_gemini_no_fact and "📜" not in res_no_fact_day)
+
+# 6.9 End-to-End симуляція _post_morning_message() з викликом Telegram API
+async def test_publish_e2e():
+    mock_bot = AsyncMock()
+    test_dawn = DawnBot()
+    test_dawn.bot = mock_bot
+    test_dawn.model = MagicMock()
+    test_dawn.get_weather = MagicMock(return_value="Температура +13°C, хмарно з проясненнями")
+    mock_resp = MagicMock()
+    mock_resp.text = sample_gemini_post
+    test_dawn.model.generate_content = MagicMock(return_value=mock_resp)
+
+    await test_dawn._post_morning_message()
+
+    mock_bot.send_message.assert_called_once()
+    call_args = mock_bot.send_message.call_args[1]
+    sent_text = call_args["text"]
+    return sent_text.count("14 жовтня 1942 року") == 1 and sent_text.strip().endswith("Гарного дня! ☕️🇺🇦")
+
+e2e_passed = asyncio.run(test_publish_e2e())
+assert_test("6.9 End-to-End асинхронна публікація _post_morning_message(): текст чистий без дублювання", e2e_passed)
+
+# 6.10 Тест fallback при помилці валідації HTML в Telegram
+async def test_publish_html_fallback():
+    mock_bot = AsyncMock()
+    mock_bot.send_message.side_effect = [Exception("Can't parse entities: unclosed tag"), None]
+    test_dawn = DawnBot()
+    test_dawn.bot = mock_bot
+    test_dawn.model = MagicMock()
+    test_dawn.get_weather = MagicMock(return_value="Температура +13°C, хмарно")
+    mock_resp = MagicMock()
+    mock_resp.text = "<b>Доброго ранку Берестин"
+    test_dawn.model.generate_content = MagicMock(return_value=mock_resp)
+
+    await test_dawn._post_morning_message()
+    return mock_bot.send_message.call_count == 2 and "parse_mode" not in mock_bot.send_message.call_args_list[1][1]
+
+fallback_passed = asyncio.run(test_publish_html_fallback())
+assert_test("6.10 Автоматичний повтор без parse_mode при битому HTML від Gemini", fallback_passed)
+
 
 # ==============================================================================
 # 7. БОТ ОРЕНДИ (rent_bot.py)
