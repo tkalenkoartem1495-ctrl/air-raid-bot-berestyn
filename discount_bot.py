@@ -23,8 +23,20 @@ class DiscountMonitor:
         # Реєструємо обробник нових повідомлень
         self.client.on(events.NewMessage)(self._on_new_message)
 
+    def _is_atb_message(self, text: str) -> bool:
+        if not text:
+            return False
+        # Перевіряємо хештеги або назву: #АТБ, #atb, фірмові емодзі каналу 😜🤪 або акцію "Економія"
+        if re.search(r'#?атб|#?atb\b', text, re.I):
+            return True
+        if "😜🤪" in text:
+            return True
+        if re.search(r'акція:\s*"?економія"?', text, re.I):
+            return True
+        return False
+
     def _process_text(self, text: str) -> str:
-        if not text or "#АТБ" not in text:
+        if not self._is_atb_message(text):
             return ""
             
         lines = [line.strip() for line in text.split('\n') if line.strip()]
@@ -40,6 +52,10 @@ class DiscountMonitor:
                 break
                 
         if term_line:
+            if not any(emoji in term_line for emoji in ("📆", "🗓", "📅", "🕒", "⏰")):
+                term_line = f"📆 {term_line}"
+            if "#АТБ" in term_line.upper():
+                return term_line
             return f"{term_line}\n#АТБ"
         else:
             return "#АТБ"
@@ -73,10 +89,10 @@ class DiscountMonitor:
             album_msgs = [m for m in all_msgs if m.grouped_id == event.message.grouped_id]
             album_msgs.sort(key=lambda x: x.id)
             
-            # Шукаємо текст з #АТБ серед частин альбому
+            # Шукаємо текст АТБ серед частин альбому
             target_text = ""
             for m in album_msgs:
-                if m.raw_text and "#АТБ" in m.raw_text:
+                if m.raw_text and self._is_atb_message(m.raw_text):
                     target_text = m.raw_text
                     break
                     
