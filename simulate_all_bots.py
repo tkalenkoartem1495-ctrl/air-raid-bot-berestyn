@@ -204,16 +204,49 @@ assert_test("4.6 Ігнорування акцій інших магазинів
 # 5. БОТ ЗАТРИМОК ПОЇЗДІВ УЗ (railway_bot.py)
 # ==============================================================================
 print("\n[5/8] 🚆 БОТ УЗ / ЗАТРИМОК ПОЇЗДІВ (railway_bot.py)")
-from railway_bot import RailwayMonitor
+from railway_bot import RailwayMonitor, MONITORED_CHANNELS
 
 rail_mon = RailwayMonitor(dummy_client)
 
 text_relevant = "⚠️ Поїзд №102 Краматорськ - Херсон (прямує через Красноград) затримується на 35 хв."
 text_irrelevant = "⚠️ Поїзд №712 Київ - Краматорськ затримується на 10 хв."
 
+# Реальний текст з допису @UZprymisky/13932 (пропущений ботом)
+text_real_13932 = (
+    "Харківщина\n\n"
+    "❕З безпекових міркувань затримується:\n"
+    "🚊Поїзд №6694 Берестин – Харків-Пасажирський курсує зі станції Власівка із затримкою 6 год. 28 хв.\n\n"
+    "Дякуємо за розуміння.\n\n"
+    "❗️ У разі підвищеної небезпеки поїзд буде зупинено.\n\n"
+    "#Харківщина"
+)
+
 assert_test("5.1 Виявлення поїздів через Красноград/Берестин", bool(re.search(r'(Берестин|Красноград)', text_relevant, re.I)))
 assert_test("5.2 Ігнорування нерелевантних напрямків УЗ", not bool(re.search(r'(Берестин|Красноград)', text_irrelevant, re.I)))
 assert_test("5.3 Заміна Красноград -> Берестин у повідомленнях УЗ", "Берестин" in rail_mon._replace_city_name(text_relevant))
+
+# 5.4 Реальний допис 13932: слово «Берестин» знаходиться у назві поїзда
+assert_test("5.4 Допис 13932: виявлення 'Берестин' у назві маршруту поїзда", bool(re.search(r'(Берестин|Красноград)', text_real_13932, re.I)))
+
+# 5.5 Реальний допис 13932: правильне форматування повідомлення
+lines_13932 = [line.strip() for line in text_real_13932.split('\n') if line.strip()]
+header_13932 = ""
+trains_13932 = []
+for i, line in enumerate(lines_13932):
+    if re.search(r'(Берестин|Красноград)', line, re.I):
+        trains_13932.append(line)
+        if not header_13932 and i > 0:
+            for j in range(i - 1, -1, -1):
+                prev = lines_13932[j]
+                if prev.endswith(':') or '❕' in prev or any(w in prev.lower() for w in ['затримується', 'змінено', 'скасовано', 'маршрут']):
+                    header_13932 = prev
+                    break
+result_13932 = (header_13932 + " " + " ".join(trains_13932)) if header_13932 else " ".join(trains_13932)
+assert_test("5.5 Допис 13932: заголовок '❕З безпекових...' + рядок поїзда коректно витягнуто",
+            "❕З безпекових міркувань затримується:" in result_13932 and "6694" in result_13932)
+
+# 5.6 Перевірка що chats= фільтр використовується (UZprymisky в MONITORED_CHANNELS)
+assert_test("5.6 'UZprymisky' є у MONITORED_CHANNELS для chats= фільтру", "UZprymisky" in MONITORED_CHANNELS)
 
 
 # ==============================================================================
